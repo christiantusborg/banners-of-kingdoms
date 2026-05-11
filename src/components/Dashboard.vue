@@ -1,42 +1,62 @@
 <script setup lang="ts">
-import { store, Resource, manualCollect, addWorker, removeWorker, WorkerType, getTotalWorkers, adjustAnumisSwarm, trainTroop, promoteTroop, TROOP_CONFIG, TRAINING_COSTS, constructBuilding, BUILDING_COSTS } from '../store/gameStore';
+import { store, Resource, manualCollect, addWorker, removeWorker, WorkerType, getTotalWorkers, adjustSpies, trainTroop, promoteTroop, TROOP_CONFIG, constructBuilding, conquest, explore, kidnap, gatherResources, landUsed, tradeResources, effectiveBuildingCost, effectiveBuildingLand, getTradeRatio, popPerHousing, workerCapPerBuilding, troopAttackBonus, troopDefenseBonus, troopMultiplier, hasResearch, getApRegenSeconds, RESEARCH, isResearchAvailable, researchUnlock, effectiveResearchCost, trainingCost, ResearchBranch, HEROES, HeroRarity, hasHero, hireHero, dismissHero, canHireHero, heroSlotsTotal, heroSlotsUsed, heroSlotsFree, TAVERN_NAMES, TAVERN_MAX_LEVEL } from '../store/gameStore';
 import { saveGame } from '../services/api';
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 const totalWorkers = computed(() => getTotalWorkers());
 
 const militaryStats = computed(() => {
   const race = store.player.race || 'Human';
   const config = TROOP_CONFIG[race];
-  
-  // Base stats from Troops
-  let att = (store.military.tier1 * config.tier1.attack) +
-              (store.military.tier2 * config.tier2.attack) +
-              (store.military.tier3 * config.tier3.attack);
-              
-  let def = (store.military.tier1 * config.tier1.defense) +
-              (store.military.tier2 * config.tier2.defense) +
-              (store.military.tier3 * config.tier3.defense);
-  
-  // Bonus from Population (1 per peasant)
-  const popBonus = Math.floor(store.province.population);
+
+  const t1AtkEach = config.tier1.attack + troopAttackBonus(1);
+  const t2AtkEach = config.tier2.attack + troopAttackBonus(2);
+  const t3AtkEach = config.tier3.attack + troopAttackBonus(3);
+  const t1DefEach = config.tier1.defense + troopDefenseBonus(1);
+  const t2DefEach = config.tier2.defense + troopDefenseBonus(2);
+  const t3DefEach = config.tier3.defense + troopDefenseBonus(3);
+
+  let att = store.military.tier1 * t1AtkEach + store.military.tier2 * t2AtkEach + store.military.tier3 * t3AtkEach;
+  let def = store.military.tier1 * t1DefEach + store.military.tier2 * t2DefEach + store.military.tier3 * t3DefEach;
+
+  if (hasResearch('master_spies')) {
+    att += store.player.spies * t1AtkEach;
+    def += store.player.spies * t1DefEach;
+  }
+
+  const mult = troopMultiplier();
+  att *= mult;
+  def *= mult;
+
+  let popBonus = Math.floor(store.province.population);
+  if (hasResearch('charm')) popBonus += store.player.spies;
   att += popBonus;
   def += popBonus;
-              
-  return { attack: att, defense: def, popBonus };
+
+  return { attack: Math.floor(att), defense: Math.floor(def), popBonus };
 });
 const unassignedPop = computed(() => Math.max(0, Math.floor(store.province.population) - totalWorkers.value));
+const troopCount = computed(() => store.military.tier1 + store.military.tier2 + store.military.tier3);
+const conquestPreview = computed(() => ({
+  losses: Math.ceil(troopCount.value * 0.1),
+  gain: Math.floor(troopCount.value / 3),
+}));
+const explorePreview = computed(() => Math.floor(troopCount.value / 5));
+const landSummary = computed(() => ({ used: landUsed(), total: store.province.acres }));
+
+const tradeFrom = ref<Resource>('Food');
+const tradeTo = ref<Resource>('Iron');
+const tradeAmount = ref<number>(getTradeRatio());
+const tradeMax = computed(() => Math.max(getTradeRatio(), Math.floor(store.resources[tradeFrom.value] / getTradeRatio()) * getTradeRatio()));
+const tradeReceive = computed(() => Math.floor(tradeAmount.value / getTradeRatio()));
+watch(tradeFrom, () => { tradeAmount.value = Math.min(tradeAmount.value, tradeMax.value); });
+const doTrade = () => {
+  tradeResources(tradeFrom.value, tradeTo.value, tradeAmount.value);
+  tradeAmount.value = Math.min(tradeAmount.value, tradeMax.value);
+};
 const employmentRate = computed(() => {
   if (store.province.population === 0) return 0;
   return Math.min(100, (totalWorkers.value / store.province.population) * 100);
-});
-
-const lowestResource = computed(() => {
-  const unlockedKeys = store.player.unlockedResources;
-  if (unlockedKeys.length === 0) return null;
-  return unlockedKeys.reduce((prev, curr) => 
-    store.resources[curr] < store.resources[prev] ? curr : prev
-  );
 });
 
 const handleSave = () => {
@@ -55,6 +75,114 @@ const workerTypes: { type: WorkerType; name: string; icon: string; desc: string 
   { type: 'basic', name: 'Basic', icon: '👷', desc: 'Collects 1 per tick' },
   { type: 'panda', name: 'Panda', icon: '🐼', desc: 'Collects on click' },
 ];
+
+const activeTab = ref<'empire' | 'research' | 'tavern'>('empire');
+
+const rarityMeta: Record<HeroRarity, { label: string; title: string; border: string; chip: string }> = {
+  common:    { label: 'Common',    title: 'text-slate-300',  border: 'border-slate-600',     chip: 'bg-slate-600' },
+  uncommon:  { label: 'Uncommon',  title: 'text-emerald-400', border: 'border-emerald-700',  chip: 'bg-emerald-700' },
+  rare:      { label: 'Rare',      title: 'text-sky-400',     border: 'border-sky-700',      chip: 'bg-sky-700' },
+  epic:      { label: 'Epic',      title: 'text-violet-400',  border: 'border-violet-700',   chip: 'bg-violet-700' },
+  legendary: { label: 'Legendary', title: 'text-amber-400',   border: 'border-amber-600',    chip: 'bg-amber-600' },
+};
+const rarityOrder: HeroRarity[] = ['common', 'uncommon', 'rare', 'epic', 'legendary'];
+
+const heroesByRarity = computed(() => {
+  const out: Record<HeroRarity, typeof HEROES[string][]> = {
+    common: [], uncommon: [], rare: [], epic: [], legendary: [],
+  };
+  for (const h of Object.values(HEROES)) out[h.rarity].push(h);
+  return out;
+});
+
+const heroCostLabel = (h: typeof HEROES[string]) => {
+  const parts = [`${h.cost.Gold}g`];
+  if (h.cost.Mana !== undefined) parts.push(`${h.cost.Mana}m`);
+  return parts.join(' + ');
+};
+
+const heroBlockReason = (h: typeof HEROES[string]) => {
+  if (hasHero(h.id)) return 'Hired';
+  if (h.prereqs?.tavernLevel && store.buildings.Tavern < h.prereqs.tavernLevel) {
+    return `Tavern lv ${h.prereqs.tavernLevel}`;
+  }
+  if (h.prereqs?.research) {
+    const missing = h.prereqs.research.filter(r => !hasResearch(r));
+    if (missing.length) return `Needs: ${missing.map(id => RESEARCH[id]?.name ?? id).join(', ')}`;
+  }
+  if (heroSlotsFree() < 1) return 'No slots';
+  if (store.resources.Gold < h.cost.Gold) return 'Need gold';
+  if (h.cost.Mana !== undefined && store.resources.Mana < h.cost.Mana) return 'Need mana';
+  return '';
+};
+
+const heroAtSlot = (slot: number) => store.heroes[slot - 1];
+
+type ResearchDef = typeof RESEARCH[string];
+
+const branchMeta: Record<ResearchBranch, { label: string; title: string; border: string; icon: string }> = {
+  military:     { label: 'Military',     title: 'text-rose-400',    border: 'border-rose-900/50',    icon: '⚔️' },
+  economy:      { label: 'Economy',      title: 'text-amber-400',   border: 'border-amber-900/50',   icon: '💰' },
+  civic:        { label: 'Civic',        title: 'text-sky-400',     border: 'border-sky-900/50',     icon: '🏛️' },
+  construction: { label: 'Construction', title: 'text-stone-400',   border: 'border-stone-700/50',   icon: '🏗️' },
+  espionage:    { label: 'Espionage',    title: 'text-violet-400',  border: 'border-violet-900/50',  icon: '🕵️' },
+  magic:        { label: 'Magic',        title: 'text-fuchsia-400', border: 'border-fuchsia-900/50', icon: '🔮' },
+};
+const branchOrder: ResearchBranch[] = ['military', 'economy', 'civic', 'construction', 'espionage', 'magic'];
+
+const researchByBranch = computed(() => {
+  const out: Record<ResearchBranch, ResearchDef[]> = {
+    military: [], economy: [], civic: [], construction: [], espionage: [], magic: [],
+  };
+  for (const r of Object.values(RESEARCH)) out[r.branch].push(r);
+  return out;
+});
+
+const CELL_W = 220;
+const CELL_H = 140;
+const PAD = 20;
+
+const tierColumns = (branch: ResearchBranch) => Math.max(...researchByBranch.value[branch].map(r => r.tier));
+const slotRows = (branch: ResearchBranch) => Math.max(...researchByBranch.value[branch].map(r => r.slot));
+
+const nodePos = (r: ResearchDef) => ({
+  x: (r.tier - 1) * CELL_W + CELL_W / 2 + PAD,
+  y: (r.slot - 1) * CELL_H + CELL_H / 2 + PAD,
+});
+
+const branchLinks = (branch: ResearchBranch) => {
+  const items = researchByBranch.value[branch];
+  const map = new Map(items.map(r => [r.id, r]));
+  const links: { key: string; x1: number; y1: number; x2: number; y2: number; done: boolean }[] = [];
+  for (const r of items) {
+    for (const pid of r.prereqs) {
+      const p = map.get(pid);
+      if (!p) continue;
+      const a = nodePos(p);
+      const b = nodePos(r);
+      links.push({ key: `${pid}->${r.id}`, x1: a.x, y1: a.y, x2: b.x, y2: b.y, done: hasResearch(pid) });
+    }
+  }
+  return links;
+};
+
+const cardStateClass = (r: ResearchDef) => {
+  if (hasResearch(r.id)) return 'bg-emerald-900/40 border-emerald-500';
+  if (isResearchAvailable(r.id)) return 'bg-slate-900/80 border-amber-500/60';
+  return 'bg-slate-900/30 border-slate-700 opacity-60';
+};
+
+const canAfford = (r: ResearchDef) => {
+  const c = effectiveResearchCost(r);
+  if (r.cost.Gold !== undefined && store.resources.Gold < c.Gold) return false;
+  if (r.cost.Mana !== undefined && store.resources.Mana < c.Mana) return false;
+  return true;
+};
+
+const costLabel = (r: ResearchDef) => {
+  const c = effectiveResearchCost(r);
+  return r.cost.Gold !== undefined ? `${c.Gold}g` : `${c.Mana}m`;
+};
 </script>
 
 <template>
@@ -86,27 +214,27 @@ const workerTypes: { type: WorkerType; name: string; icon: string; desc: string 
       <div class="grid grid-cols-2 md:grid-cols-6 gap-4">
         <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 flex flex-col justify-center relative overflow-hidden group">
           <p class="text-xs text-amber-500 uppercase font-bold">Action Points</p>
-          <p class="text-xl font-mono text-white">{{ store.player.actionPoints }} <span class="text-[10px] text-slate-500">Regen: {{ 120 - store.apAccumulator }}s</span></p>
+          <p class="text-xl font-mono text-white">{{ store.player.actionPoints }} <span class="text-[10px] text-slate-500">Regen: {{ getApRegenSeconds() - store.apAccumulator }}s</span></p>
           <div class="absolute bottom-0 left-0 h-1 bg-amber-500" :style="{ width: `${(store.player.actionPoints / store.player.maxActionPoints) * 100}%` }"></div>
         </div>
 
         <div class="bg-slate-800 p-4 rounded-xl border border-blue-500/50 flex justify-between items-center bg-blue-900/10">
           <div>
-            <p class="text-xs text-blue-400 uppercase font-bold">Anumis Swarm</p>
+            <p class="text-xs text-blue-400 uppercase font-bold">Spies</p>
             <div class="flex items-center gap-2">
-              <button @click="adjustAnumisSwarm(-1)" class="w-5 h-5 bg-blue-900/50 rounded flex items-center justify-center text-xs">-</button>
-              <p class="text-xl font-mono text-blue-400">{{ store.player.anumisSwarm }}</p>
-              <button @click="adjustAnumisSwarm(1)" class="w-5 h-5 bg-blue-900/50 rounded flex items-center justify-center text-xs">+</button>
+              <button @click="adjustSpies(-1)" class="w-5 h-5 bg-blue-900/50 rounded flex items-center justify-center text-xs">-</button>
+              <p class="text-xl font-mono text-blue-400">{{ store.player.spies }}</p>
+              <button @click="adjustSpies(1)" class="w-5 h-5 bg-blue-900/50 rounded flex items-center justify-center text-xs">+</button>
             </div>
-            <p class="text-[8px] text-blue-300 mt-1">Targeting: {{ lowestResource }} (+{{ store.player.anumisSwarm * 2 }})</p>
           </div>
-          <span class="text-2xl animate-pulse">🤖</span>
+          <span class="text-2xl">🕵️</span>
         </div>
 
         <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
           <div>
             <p class="text-xs text-slate-500 uppercase font-bold">Land</p>
             <p class="text-xl font-mono text-emerald-400">{{ store.province.acres }} <span class="text-xs">Acres</span></p>
+            <p class="text-[10px] text-slate-500">Land used: {{ landSummary.used }} / {{ landSummary.total }}</p>
           </div>
           <span class="text-2xl">🗺️</span>
         </div>
@@ -114,16 +242,17 @@ const workerTypes: { type: WorkerType; name: string; icon: string; desc: string 
         <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 flex flex-col justify-center relative group">
           <div class="flex justify-between items-center mb-1">
             <p class="text-xs text-slate-500 uppercase font-bold">Population</p>
-            <button 
-              @click="constructBuilding('Housing')" 
-              :disabled="store.player.actionPoints < 1 || store.resources.Gold < BUILDING_COSTS.Housing.Gold || store.resources.Wood < BUILDING_COSTS.Housing.Wood"
+            <button
+              @click="constructBuilding('Housing')"
+              :disabled="store.player.actionPoints < 1 || store.resources.Gold < effectiveBuildingCost(store.buildings.Housing).Gold || store.resources.Wood < effectiveBuildingCost(store.buildings.Housing).Wood || landSummary.used + effectiveBuildingLand('Housing') > store.province.acres"
               class="text-[8px] bg-sky-900/50 hover:bg-sky-800 text-sky-200 px-1.5 py-0.5 rounded border border-sky-700 disabled:opacity-30"
-              :title="`Build Housing (+100 Max Pop) - Cost: ${BUILDING_COSTS.Housing.Gold}g, ${BUILDING_COSTS.Housing.Wood}w`"
+              :title="`Build Housing (+10 Max Pop) - Cost: ${effectiveBuildingCost(store.buildings.Housing).Gold}g, ${effectiveBuildingCost(store.buildings.Housing).Wood}w, ${effectiveBuildingLand('Housing')} land`"
             >
               + Build House
             </button>
           </div>
-          <p class="text-xl font-mono text-sky-400">{{ Math.floor(store.province.population) }} <span class="text-xs text-slate-600">/ {{ store.buildings.Housing * 100 }}</span></p>
+          <p class="text-xl font-mono text-sky-400">{{ Math.floor(store.province.population) }} <span class="text-xs text-slate-600">/ {{ store.buildings.Housing * popPerHousing() }}</span></p>
+          <p class="text-[10px] text-slate-500 mt-1">Next: Lv {{ store.buildings.Housing + 1 }} — {{ effectiveBuildingCost(store.buildings.Housing).Gold }}g, {{ effectiveBuildingCost(store.buildings.Housing).Wood }}w · Land: +{{ effectiveBuildingLand('Housing') }}</p>
         </div>
 
         <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
@@ -144,7 +273,22 @@ const workerTypes: { type: WorkerType; name: string; icon: string; desc: string 
       </div>
     </header>
 
-    <main class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+    <nav class="mb-6 flex gap-2 border-b border-slate-700">
+      <button
+        @click="activeTab = 'empire'"
+        :class="['px-6 py-3 text-sm font-bold uppercase tracking-wide transition-all border-b-2', activeTab === 'empire' ? 'text-amber-400 border-amber-500' : 'text-slate-500 border-transparent hover:text-slate-300']"
+      >🏰 Empire</button>
+      <button
+        @click="activeTab = 'research'"
+        :class="['px-6 py-3 text-sm font-bold uppercase tracking-wide transition-all border-b-2', activeTab === 'research' ? 'text-amber-400 border-amber-500' : 'text-slate-500 border-transparent hover:text-slate-300']"
+      >📜 Research <span v-if="store.research.length" class="text-[10px] text-slate-400">({{ store.research.length }})</span></button>
+      <button
+        @click="activeTab = 'tavern'"
+        :class="['px-6 py-3 text-sm font-bold uppercase tracking-wide transition-all border-b-2', activeTab === 'tavern' ? 'text-amber-400 border-amber-500' : 'text-slate-500 border-transparent hover:text-slate-300']"
+      >🍺 Tavern <span class="text-[10px] text-slate-400">({{ heroSlotsUsed() }}/{{ heroSlotsTotal() }})</span></button>
+    </nav>
+
+    <main v-if="activeTab === 'empire'" class="grid grid-cols-1 lg:grid-cols-2 gap-8">
       <!-- Resource Production -->
       <section class="bg-slate-800 p-6 rounded-2xl border border-slate-700">
         <h2 class="text-2xl font-bold mb-6 flex items-center gap-2">
@@ -152,42 +296,40 @@ const workerTypes: { type: WorkerType; name: string; icon: string; desc: string 
           <span class="text-xs font-normal text-slate-500 ml-auto">Cost: 1 AP per change</span>
         </h2>
         <div class="space-y-6">
-          <div 
-            v-for="(workers, res) in store.workers" 
-            :key="res" 
+          <div
+            v-for="(workers, res) in store.workers"
+            :key="res"
             :class="[
               'p-4 rounded-xl border transition-all relative overflow-hidden',
-              store.player.unlockedResources.includes(res as Resource) 
-                ? 'bg-slate-900/50 border-slate-700/50' 
+              store.player.unlockedResources.includes(res as Resource)
+                ? 'bg-slate-900/50 border-slate-700/50'
                 : 'bg-slate-950/80 border-slate-800 opacity-50 grayscale',
-              lowestResource === res && store.player.anumisSwarm > 0 ? 'ring-2 ring-blue-500/30' : ''
             ]"
           >
-            <!-- Anumis Indicator Overlay -->
-            <div v-if="lowestResource === res && store.player.anumisSwarm > 0" class="absolute top-0 right-0 bg-blue-600 text-[8px] text-white px-2 py-0.5 rounded-bl-lg font-bold z-20 animate-pulse">
-              ANUMIS TARGET: +{{ store.player.anumisSwarm * 2 }}
-            </div>
-
             <div class="flex justify-between items-start mb-4">
               <div class="flex items-center gap-3">
                 <span class="text-3xl">{{ resourceIcons[res as Resource] }}</span>
                 <div>
                   <span class="text-xl font-bold">{{ res }}</span>
-                  <p class="text-[10px] text-slate-500 uppercase">Workers: {{ (store.workers[res as Resource].basic + store.workers[res as Resource].panda) }} / {{ store.buildings[res as Resource] * 5 }}</p>
+                  <p class="text-[10px] text-slate-500 uppercase">Workers: {{ (store.workers[res as Resource].basic + store.workers[res as Resource].panda) }} / {{ store.buildings[res as Resource] * workerCapPerBuilding() }}</p>
                 </div>
               </div>
               
               <div class="flex flex-col items-end gap-2">
-                <button 
+                <button
                   v-if="store.player.unlockedResources.includes(res as Resource)"
-                  @click="constructBuilding(res as Resource)" 
-                  :disabled="store.player.actionPoints < 1 || store.resources.Gold < BUILDING_COSTS.Resource.Gold || store.resources.Wood < BUILDING_COSTS.Resource.Wood"
+                  @click="constructBuilding(res as Resource)"
+                  :disabled="store.player.actionPoints < 1 || store.resources.Gold < effectiveBuildingCost(store.buildings[res as Resource]).Gold || store.resources.Wood < effectiveBuildingCost(store.buildings[res as Resource]).Wood || landSummary.used + effectiveBuildingLand(res as Resource) > store.province.acres"
                   class="px-2 py-1 bg-emerald-700 hover:bg-emerald-600 disabled:bg-slate-700 disabled:opacity-50 rounded text-[10px] font-bold transition-all border border-emerald-600/30"
-                  :title="`Build ${res} Facility (+5 Slots) - Cost: ${BUILDING_COSTS.Resource.Gold}g, ${BUILDING_COSTS.Resource.Wood}w`"
+                  :title="`Build ${res} Facility (+5 Slots) - Cost: ${effectiveBuildingCost(store.buildings[res as Resource]).Gold}g, ${effectiveBuildingCost(store.buildings[res as Resource]).Wood}w, ${effectiveBuildingLand(res as Resource)} land`"
                 >
-                  <span v-if="store.resources.Gold < BUILDING_COSTS.Resource.Gold || store.resources.Wood < BUILDING_COSTS.Resource.Wood">Need Resources</span>
+                  <span v-if="store.resources.Gold < effectiveBuildingCost(store.buildings[res as Resource]).Gold || store.resources.Wood < effectiveBuildingCost(store.buildings[res as Resource]).Wood">Need Resources</span>
+                  <span v-else-if="landSummary.used + effectiveBuildingLand(res as Resource) > store.province.acres">Need Land</span>
                   <span v-else>+ Build Facility (1 AP)</span>
                 </button>
+                <p v-if="store.player.unlockedResources.includes(res as Resource)" class="text-[10px] text-slate-500">
+                  Next: Lv {{ store.buildings[res as Resource] + 1 }} — {{ effectiveBuildingCost(store.buildings[res as Resource]).Gold }}g, {{ effectiveBuildingCost(store.buildings[res as Resource]).Wood }}w · Land: +{{ effectiveBuildingLand(res as Resource) }}
+                </p>
                 <button
                   v-if="workers.panda > 0"
                   @click="manualCollect(res as Resource)"
@@ -211,7 +353,7 @@ const workerTypes: { type: WorkerType; name: string; icon: string; desc: string 
                   <span class="font-mono">{{ workers[wt.type] }}</span>
                   <button 
                     @click="addWorker(res as Resource, wt.type)" 
-                    :disabled="store.player.actionPoints < 1 || !store.player.unlockedResources.includes(res as Resource) || (store.workers[res as Resource].basic + store.workers[res as Resource].panda) >= store.buildings[res as Resource] * 5"
+                    :disabled="store.player.actionPoints < 1 || !store.player.unlockedResources.includes(res as Resource) || (store.workers[res as Resource].basic + store.workers[res as Resource].panda) >= store.buildings[res as Resource] * workerCapPerBuilding()"
                     class="w-6 h-6 bg-blue-900/50 hover:bg-blue-800 disabled:opacity-30 rounded flex items-center justify-center transition-colors"
                   >+</button>
                 </div>
@@ -233,15 +375,19 @@ const workerTypes: { type: WorkerType; name: string; icon: string; desc: string 
               <p class="text-[10px] text-slate-500 uppercase mt-1">Capacity: {{ store.military.tier1 + store.military.tier2 + store.military.tier3 }} / {{ store.buildings.Barracks * 10 }} Troops</p>
             </div>
             <div class="flex flex-col items-end gap-2">
-              <button 
-                @click="constructBuilding('Barracks')" 
-                :disabled="store.player.actionPoints < 1 || store.resources.Gold < BUILDING_COSTS.Barracks.Gold || store.resources.Wood < BUILDING_COSTS.Barracks.Wood"
+              <button
+                @click="constructBuilding('Barracks')"
+                :disabled="store.player.actionPoints < 1 || store.resources.Gold < effectiveBuildingCost(store.buildings.Barracks).Gold || store.resources.Wood < effectiveBuildingCost(store.buildings.Barracks).Wood || landSummary.used + effectiveBuildingLand('Barracks') > store.province.acres"
                 class="px-2 py-1 bg-rose-900/50 hover:bg-rose-800 disabled:bg-slate-700 disabled:opacity-50 rounded text-[10px] font-bold transition-all border border-rose-800"
-                :title="`Build Barracks (+10 Slots) - Cost: ${BUILDING_COSTS.Barracks.Gold}g, ${BUILDING_COSTS.Barracks.Wood}w`"
+                :title="`Build Barracks (+10 Slots) - Cost: ${effectiveBuildingCost(store.buildings.Barracks).Gold}g, ${effectiveBuildingCost(store.buildings.Barracks).Wood}w, ${effectiveBuildingLand('Barracks')} land`"
               >
-                <span v-if="store.resources.Gold < BUILDING_COSTS.Barracks.Gold || store.resources.Wood < BUILDING_COSTS.Barracks.Wood">Need Resources</span>
+                <span v-if="store.resources.Gold < effectiveBuildingCost(store.buildings.Barracks).Gold || store.resources.Wood < effectiveBuildingCost(store.buildings.Barracks).Wood">Need Resources</span>
+                <span v-else-if="landSummary.used + effectiveBuildingLand('Barracks') > store.province.acres">Need Land</span>
                 <span v-else>+ Build Barracks (1 AP)</span>
               </button>
+              <p class="text-[10px] text-slate-500">
+                Next: Lv {{ store.buildings.Barracks + 1 }} — {{ effectiveBuildingCost(store.buildings.Barracks).Gold }}g, {{ effectiveBuildingCost(store.buildings.Barracks).Wood }}w · Land: +{{ effectiveBuildingLand('Barracks') }}
+              </p>
               <div class="flex gap-2">
                 <div class="bg-slate-900 px-3 py-1 rounded border border-rose-500/30 text-center relative group">
                   <p class="text-[10px] uppercase text-slate-500">Atk</p>
@@ -266,12 +412,11 @@ const workerTypes: { type: WorkerType; name: string; icon: string; desc: string 
                 <p class="font-bold text-slate-200">Tier 1 Recruits</p>
                 <p class="text-xs text-slate-500">Count: {{ store.military.tier1 }}</p>
               </div>
-              <button 
-                @click="trainTroop" 
-                :disabled="store.player.actionPoints < 1"
+              <button
+                @click="trainTroop"
                 class="px-4 py-2 bg-rose-700 hover:bg-rose-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
               >
-                Train (1 AP)
+                Train
               </button>
             </div>
             
@@ -280,12 +425,12 @@ const workerTypes: { type: WorkerType; name: string; icon: string; desc: string 
                 <p class="font-bold text-slate-200">Tier 2 Veterans</p>
                 <p class="text-xs text-slate-500">Count: {{ store.military.tier2 }}</p>
               </div>
-              <button 
-                @click="promoteTroop(1)" 
-                :disabled="store.player.actionPoints < 1 || store.military.tier1 === 0"
+              <button
+                @click="promoteTroop(1)"
+                :disabled="store.military.tier1 === 0"
                 class="px-4 py-2 bg-amber-700 hover:bg-amber-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
               >
-                Promote (1 AP)
+                Promote
               </button>
             </div>
 
@@ -294,21 +439,172 @@ const workerTypes: { type: WorkerType; name: string; icon: string; desc: string 
                 <p class="font-bold text-slate-200">Tier 3 Elite</p>
                 <p class="text-xs text-slate-500">Count: {{ store.military.tier3 }}</p>
               </div>
-              <button 
-                @click="promoteTroop(2)" 
-                :disabled="store.player.actionPoints < 1 || store.military.tier2 === 0"
+              <button
+                @click="promoteTroop(2)"
+                :disabled="store.military.tier2 === 0"
                 class="px-4 py-2 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
               >
-                Promote (1 AP)
+                Promote
               </button>
             </div>
           </div>
 
           <div class="bg-slate-900 p-3 rounded-lg text-[10px] text-slate-400">
             <p class="uppercase font-bold mb-1 text-slate-500">Costs:</p>
-            <p>Training T1: {{ TRAINING_COSTS.tier1.Gold }}g, {{ TRAINING_COSTS.tier1.Food }}f, {{ TRAINING_COSTS.tier1.Iron }}i</p>
-            <p>Promotion: {{ TRAINING_COSTS.promote.Gold }}g, {{ TRAINING_COSTS.promote.Food }}f, {{ TRAINING_COSTS.promote.Iron }}i</p>
+            <p>Training T1: {{ trainingCost('tier1').Gold }}g, {{ trainingCost('tier1').Food }}f, {{ trainingCost('tier1').Iron }}i</p>
+            <p>Promotion: {{ trainingCost('promote').Gold }}g, {{ trainingCost('promote').Food }}f, {{ trainingCost('promote').Iron }}i</p>
             <p class="mt-1 text-rose-400 italic">*Troops consume 0.2 Food per tick (Double a peasant!)</p>
+          </div>
+        </div>
+
+        <!-- Troop Actions -->
+        <div class="bg-slate-800 p-6 rounded-2xl border-2 border-rose-900/50">
+          <h2 class="text-2xl font-bold flex items-center gap-2 mb-4">
+            <span class="text-rose-500">🪖</span> Troop Actions
+          </h2>
+          <div class="flex flex-col gap-3">
+            <div class="bg-slate-900/50 p-4 rounded-xl flex justify-between items-center border border-slate-700">
+              <div>
+                <p class="font-bold text-slate-200">Conquest</p>
+                <p class="text-xs text-slate-500">Send all troops · +1 acre per 3 · lose 10%</p>
+                <p class="text-[10px] text-rose-300 mt-1">Now: +{{ conquestPreview.gain }} acres · -{{ conquestPreview.losses }} troops</p>
+              </div>
+              <button
+                @click="conquest"
+                :disabled="store.player.actionPoints < 1 || troopCount < 3"
+                class="px-4 py-2 bg-rose-700 hover:bg-rose-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
+              >
+                Conquer (1 AP)
+              </button>
+            </div>
+
+            <div class="bg-slate-900/50 p-4 rounded-xl flex justify-between items-center border border-slate-700">
+              <div>
+                <p class="font-bold text-slate-200">Explore</p>
+                <p class="text-xs text-slate-500">Scout with all troops · +1 acre per 5 · no losses</p>
+                <p class="text-[10px] text-emerald-300 mt-1">Now: +{{ explorePreview }} acres</p>
+              </div>
+              <button
+                @click="explore"
+                :disabled="store.player.actionPoints < 1 || troopCount < 5"
+                class="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
+              >
+                Explore (1 AP)
+              </button>
+            </div>
+
+            <div class="bg-slate-900/50 p-4 rounded-xl flex justify-between items-center border border-slate-700">
+              <div>
+                <p class="font-bold text-slate-200">Kidnap</p>
+                <p class="text-xs text-slate-500">+75 population · -2 troops</p>
+              </div>
+              <button
+                @click="kidnap"
+                :disabled="store.player.actionPoints < 1 || (store.military.tier1 + store.military.tier2 + store.military.tier3) < 2"
+                class="px-4 py-2 bg-amber-700 hover:bg-amber-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
+              >
+                Kidnap (1 AP)
+              </button>
+            </div>
+
+            <div class="bg-slate-900/50 p-4 rounded-xl flex justify-between items-center border border-slate-700">
+              <div>
+                <p class="font-bold text-slate-200">Gather Resources</p>
+                <p class="text-xs text-slate-500">+1 random resource per troop · Iron &amp; Wood most likely</p>
+              </div>
+              <button
+                @click="gatherResources"
+                :disabled="store.player.actionPoints < 1 || (store.military.tier1 + store.military.tier2 + store.military.tier3) < 1"
+                class="px-4 py-2 bg-sky-700 hover:bg-sky-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
+              >
+                Gather (1 AP)
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Market -->
+        <div class="bg-slate-800 p-6 rounded-2xl border-2 border-amber-900/50">
+          <h2 class="text-2xl font-bold flex items-center gap-2 mb-1">
+            <span class="text-amber-500">⚖️</span> Market
+          </h2>
+          <p class="text-[10px] text-slate-500 uppercase mb-4">Trade ratio: {{ getTradeRatio() }} : 1</p>
+
+          <div class="space-y-3">
+            <div>
+              <p class="text-[10px] uppercase font-bold text-slate-500 mb-1">From</p>
+              <div class="grid grid-cols-5 gap-1">
+                <button
+                  v-for="res in (Object.keys(resourceIcons) as Resource[])"
+                  :key="`from-${res}`"
+                  @click="tradeFrom = res"
+                  :disabled="res === tradeTo"
+                  :class="[
+                    'p-2 rounded border text-center transition-all',
+                    tradeFrom === res ? 'bg-amber-700/40 border-amber-500' : 'bg-slate-900/50 border-slate-700 hover:border-slate-500',
+                    res === tradeTo ? 'opacity-30 cursor-not-allowed' : ''
+                  ]"
+                >
+                  <span class="text-lg">{{ resourceIcons[res] }}</span>
+                  <p class="text-[9px] text-slate-400">{{ res }}</p>
+                  <p class="text-[9px] font-mono text-slate-500">{{ Math.floor(store.resources[res]) }}</p>
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <p class="text-[10px] uppercase font-bold text-slate-500 mb-1">To</p>
+              <div class="grid grid-cols-5 gap-1">
+                <button
+                  v-for="res in (Object.keys(resourceIcons) as Resource[])"
+                  :key="`to-${res}`"
+                  @click="tradeTo = res"
+                  :disabled="res === tradeFrom"
+                  :class="[
+                    'p-2 rounded border text-center transition-all',
+                    tradeTo === res ? 'bg-amber-700/40 border-amber-500' : 'bg-slate-900/50 border-slate-700 hover:border-slate-500',
+                    res === tradeFrom ? 'opacity-30 cursor-not-allowed' : ''
+                  ]"
+                >
+                  <span class="text-lg">{{ resourceIcons[res] }}</span>
+                  <p class="text-[9px] text-slate-400">{{ res }}</p>
+                  <p class="text-[9px] font-mono text-slate-500">{{ Math.floor(store.resources[res]) }}</p>
+                </button>
+              </div>
+            </div>
+
+            <div class="pt-1">
+              <div class="flex justify-between items-center mb-1">
+                <p class="text-[10px] uppercase font-bold text-slate-500">Amount to spend</p>
+                <p class="text-xs font-mono text-amber-400">{{ tradeAmount }}</p>
+              </div>
+              <input
+                type="range"
+                :min="getTradeRatio()"
+                :max="tradeMax"
+                :step="getTradeRatio()"
+                v-model.number="tradeAmount"
+                class="w-full accent-amber-500"
+              />
+              <div class="flex justify-between text-[9px] text-slate-500 mt-1">
+                <span>{{ getTradeRatio() }}</span>
+                <span>{{ tradeMax }}</span>
+              </div>
+            </div>
+
+            <div class="bg-slate-900/50 p-3 rounded-lg text-center text-sm border border-slate-700">
+              Spend <span class="font-bold text-rose-400">{{ tradeAmount }} {{ tradeFrom }}</span>
+              <span class="text-slate-500"> → </span>
+              Get <span class="font-bold text-emerald-400">{{ tradeReceive }} {{ tradeTo }}</span>
+            </div>
+
+            <button
+              @click="doTrade"
+              :disabled="tradeFrom === tradeTo || tradeAmount < getTradeRatio() || store.resources[tradeFrom] < tradeAmount"
+              class="w-full px-4 py-2 bg-amber-700 hover:bg-amber-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
+            >
+              Trade
+            </button>
           </div>
         </div>
 
@@ -323,10 +619,10 @@ const workerTypes: { type: WorkerType; name: string; icon: string; desc: string 
               </div>
             </div>
             <div class="flex items-start gap-4">
-              <span class="text-2xl animate-pulse">🤖</span>
+              <span class="text-2xl">🕵️</span>
               <div>
-                <h3 class="font-bold text-blue-400">Anumis Swarm</h3>
-                <p class="text-sm">Global pool. Automatically targets the resource you have the LEAST of. Collects 2 per Anumis.</p>
+                <h3 class="font-bold text-blue-400">Spies</h3>
+                <p class="text-sm">Occupy worker slots but have no active role yet.</p>
               </div>
             </div>
             <div class="flex items-start gap-4">
@@ -348,5 +644,154 @@ const workerTypes: { type: WorkerType; name: string; icon: string; desc: string 
         </div>
       </section>
     </main>
+
+    <section v-else-if="activeTab === 'research'" class="space-y-8">
+      <div
+        v-for="branch in branchOrder"
+        :key="branch"
+        :class="['bg-slate-800 p-6 rounded-2xl border-2', branchMeta[branch].border]"
+      >
+        <h2 :class="['text-2xl font-bold mb-4 flex items-center gap-2', branchMeta[branch].title]">
+          <span>{{ branchMeta[branch].icon }}</span> {{ branchMeta[branch].label }}
+        </h2>
+        <div class="overflow-x-auto">
+          <svg
+            :width="tierColumns(branch) * CELL_W + PAD * 2"
+            :height="slotRows(branch) * CELL_H + PAD * 2"
+            :viewBox="`0 0 ${tierColumns(branch) * CELL_W + PAD * 2} ${slotRows(branch) * CELL_H + PAD * 2}`"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <line
+              v-for="link in branchLinks(branch)"
+              :key="link.key"
+              :x1="link.x1" :y1="link.y1" :x2="link.x2" :y2="link.y2"
+              :stroke="link.done ? '#22c55e' : '#475569'"
+              :stroke-dasharray="link.done ? '' : '5,4'"
+              stroke-width="2"
+            />
+            <foreignObject
+              v-for="r in researchByBranch[branch]"
+              :key="r.id"
+              :x="nodePos(r).x - 100"
+              :y="nodePos(r).y - 55"
+              width="200"
+              height="110"
+            >
+              <div xmlns="http://www.w3.org/1999/xhtml" :class="['h-full p-2 rounded-lg border flex flex-col gap-1', cardStateClass(r)]">
+                <div class="flex items-center justify-between">
+                  <p class="font-bold text-slate-100 text-xs leading-tight">{{ r.name }}</p>
+                  <span v-if="hasResearch(r.id)" class="text-emerald-400 text-sm">✔</span>
+                  <span v-else-if="!isResearchAvailable(r.id)" class="text-slate-500 text-sm">🔒</span>
+                </div>
+                <p class="text-[10px] text-slate-400 leading-tight flex-1">{{ r.description }}</p>
+                <div class="flex items-center justify-between">
+                  <span :class="['text-[10px] font-mono', r.cost.Gold !== undefined ? 'text-amber-400' : 'text-fuchsia-400']">{{ costLabel(r) }}</span>
+                  <button
+                    v-if="isResearchAvailable(r.id)"
+                    @click="researchUnlock(r.id)"
+                    :disabled="!canAfford(r)"
+                    class="px-2 py-0.5 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-30 rounded text-[10px] font-bold"
+                  >Research</button>
+                </div>
+              </div>
+            </foreignObject>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <section v-else-if="activeTab === 'tavern'" class="space-y-8">
+      <!-- Tavern header / upgrade -->
+      <div class="bg-slate-800 p-6 rounded-2xl border-2 border-amber-900/50">
+        <div class="flex justify-between items-start gap-6">
+          <div>
+            <h2 class="text-3xl font-bold text-amber-400 flex items-center gap-2">
+              🍺 {{ TAVERN_NAMES[store.buildings.Tavern] }}
+            </h2>
+            <p class="text-xs uppercase text-slate-500 mt-1">
+              Level {{ store.buildings.Tavern }} / {{ TAVERN_MAX_LEVEL }}
+              · Heroes {{ heroSlotsUsed() }} / {{ heroSlotsTotal() }}
+            </p>
+          </div>
+          <div v-if="store.buildings.Tavern < TAVERN_MAX_LEVEL" class="flex flex-col items-end gap-1">
+            <button
+              @click="constructBuilding('Tavern')"
+              :disabled="store.player.actionPoints < 1 || store.resources.Gold < effectiveBuildingCost(store.buildings.Tavern, 'Tavern').Gold || store.resources.Wood < effectiveBuildingCost(store.buildings.Tavern, 'Tavern').Wood || landSummary.used + effectiveBuildingLand('Tavern') > store.province.acres"
+              class="px-4 py-2 bg-amber-700 hover:bg-amber-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
+            >
+              Upgrade (1 AP)
+            </button>
+            <p class="text-[10px] text-slate-400 text-right">
+              Next: <span class="text-amber-300">{{ TAVERN_NAMES[store.buildings.Tavern + 1] }}</span> ·
+              +1 hero slot
+            </p>
+            <p class="text-[10px] text-slate-500">
+              {{ effectiveBuildingCost(store.buildings.Tavern, 'Tavern').Gold }}g,
+              {{ effectiveBuildingCost(store.buildings.Tavern, 'Tavern').Wood }}w ·
+              Land: +{{ effectiveBuildingLand('Tavern') }}
+            </p>
+          </div>
+          <div v-else class="text-amber-400 font-bold text-sm">⭐ Max level</div>
+        </div>
+
+        <!-- Hero slots -->
+        <div class="mt-5 flex gap-2 flex-wrap">
+          <div
+            v-for="i in heroSlotsTotal()"
+            :key="`slot-${i}`"
+            :class="['w-14 h-14 rounded-lg border-2 flex items-center justify-center text-2xl', heroAtSlot(i) ? 'bg-emerald-900/40 border-emerald-500' : 'bg-slate-900/50 border-dashed border-slate-700']"
+            :title="heroAtSlot(i) ? HEROES[heroAtSlot(i)].name : 'Empty slot'"
+          >
+            <span v-if="heroAtSlot(i)">{{ HEROES[heroAtSlot(i)].icon }}</span>
+            <span v-else class="text-slate-700">·</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Hero roster by rarity -->
+      <div
+        v-for="rarity in rarityOrder"
+        :key="rarity"
+        :class="['bg-slate-800 p-6 rounded-2xl border-2', rarityMeta[rarity].border]"
+      >
+        <h3 :class="['text-xl font-bold uppercase tracking-wide mb-4', rarityMeta[rarity].title]">
+          <span :class="['inline-block w-2 h-2 rounded-full mr-2', rarityMeta[rarity].chip]"></span>
+          {{ rarityMeta[rarity].label }}
+        </h3>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <div
+            v-for="h in heroesByRarity[rarity]"
+            :key="h.id"
+            :class="['p-3 rounded-lg border flex flex-col gap-2', hasHero(h.id) ? 'bg-emerald-900/30 border-emerald-500' : (canHireHero(h.id) ? 'bg-slate-900/80 border-amber-500/40' : 'bg-slate-900/30 border-slate-700 opacity-70')]"
+          >
+            <div class="flex items-start gap-2">
+              <span class="text-2xl leading-none">{{ h.icon }}</span>
+              <div class="flex-1">
+                <p class="font-bold text-slate-100 text-sm leading-tight">{{ h.name }}</p>
+                <p class="text-[11px] text-slate-400 leading-tight mt-0.5">{{ h.description }}</p>
+              </div>
+              <span v-if="hasHero(h.id)" class="text-emerald-400 text-lg">✔</span>
+            </div>
+            <div class="flex items-center justify-between mt-auto">
+              <span class="text-[11px] font-mono">
+                <span class="text-amber-400">{{ h.cost.Gold }}g</span>
+                <span v-if="h.cost.Mana !== undefined" class="text-fuchsia-400 ml-1">+ {{ h.cost.Mana }}m</span>
+              </span>
+              <button
+                v-if="hasHero(h.id)"
+                @click="dismissHero(h.id)"
+                class="px-2 py-1 bg-slate-700 hover:bg-rose-700 rounded text-[10px] font-bold transition-colors"
+              >Dismiss</button>
+              <button
+                v-else-if="canHireHero(h.id)"
+                @click="hireHero(h.id)"
+                class="px-2 py-1 bg-emerald-700 hover:bg-emerald-600 rounded text-[10px] font-bold"
+              >Hire</button>
+              <span v-else class="text-[10px] text-slate-500 italic">{{ heroBlockReason(h) }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
