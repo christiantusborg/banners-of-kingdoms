@@ -76,9 +76,12 @@ public class AttackDto
 // the raid schedule survive logout. Timestamps are ms since epoch.
 public class SpellStateDto
 {
-    public Dictionary<string, int> Schools { get; set; } = new();
     public List<string> Researched { get; set; } = new();
     public List<SpellBuffDto> Buffs { get; set; } = new();
+    // Pending charge-spell ids, consumed client-side by missions/raids.
+    public List<string> Charges { get; set; } = new();
+    // Losses of the last resolved siege (fuel for the Heal spell).
+    public int LastLosses { get; set; }
     public long NextRaidAt { get; set; }
     public RaidReportDto? LastRaid { get; set; }
 }

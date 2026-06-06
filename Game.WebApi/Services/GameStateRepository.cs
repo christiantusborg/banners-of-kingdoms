@@ -171,10 +171,12 @@ public class GameStateRepository
         }
 
         foreach (var row in await QueryListAsync(conn,
-            "SELECT School, Level FROM PlayerSpellSchools WHERE PlayerId = $pid",
+            "SELECT ChargeId, Value FROM PlayerSpellCharges WHERE PlayerId = $pid",
             new() { ["$pid"] = playerId }, ct))
         {
-            dto.Spells.Schools[(string)row["School"]] = Convert.ToInt32(row["Level"]);
+            var chargeId = (string)row["ChargeId"];
+            if (chargeId == "_last_losses") dto.Spells.LastLosses = Convert.ToInt32(row["Value"]);
+            else dto.Spells.Charges.Add(chargeId);
         }
 
         dto.Spells.Researched = (await QueryListAsync(conn,
@@ -379,14 +381,19 @@ public class GameStateRepository
                 LastRaidJson = excluded.LastRaidJson",
             new() { ["$pid"] = playerId, ["$w"] = state.Wizards, ["$next"] = state.Spells.NextRaidAt, ["$raid"] = lastRaidJson }, ct);
 
-        await ExecNonQueryAsync(conn, tx, "DELETE FROM PlayerSpellSchools WHERE PlayerId = $pid",
+        await ExecNonQueryAsync(conn, tx, "DELETE FROM PlayerSpellCharges WHERE PlayerId = $pid",
             new() { ["$pid"] = playerId }, ct);
-        foreach (var (school, level) in state.Spells.Schools)
+        foreach (var chargeId in state.Spells.Charges.Where(c => !string.IsNullOrEmpty(c)).Distinct())
         {
-            if (string.IsNullOrEmpty(school) || level <= 0) continue;
             await ExecNonQueryAsync(conn, tx,
-                "INSERT INTO PlayerSpellSchools (PlayerId, School, Level) VALUES ($pid, $s, $l)",
-                new() { ["$pid"] = playerId, ["$s"] = school, ["$l"] = level }, ct);
+                "INSERT INTO PlayerSpellCharges (PlayerId, ChargeId, Value) VALUES ($pid, $c, 1)",
+                new() { ["$pid"] = playerId, ["$c"] = chargeId }, ct);
+        }
+        if (state.Spells.LastLosses > 0)
+        {
+            await ExecNonQueryAsync(conn, tx,
+                "INSERT INTO PlayerSpellCharges (PlayerId, ChargeId, Value) VALUES ($pid, '_last_losses', $v)",
+                new() { ["$pid"] = playerId, ["$v"] = state.Spells.LastLosses }, ct);
         }
 
         await ExecNonQueryAsync(conn, tx, "DELETE FROM PlayerSpells WHERE PlayerId = $pid",

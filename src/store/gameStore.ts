@@ -20,24 +20,29 @@ export interface AttackMission {
 export type BuildingType = Resource | 'Barracks' | 'Housing' | 'Tavern' | 'WizardTower';
 
 // ── Wizard Tower ─────────────────────────────────────────────────────────
-// The tower hosts schools of magic. Phase 1 ships the Defence school only;
-// Attack/Darkness/Light/Land/Weaken arrive in phase 2 (tower levels 2-5 each
-// add one school slot, so a maxed tower has Defence + 4 of the other 5).
-export type SpellSchool = 'defence' | 'attack' | 'darkness' | 'light' | 'land' | 'weaken';
+// D&D 3.5 structure: spells have levels 1-9 and a school-of-magic tag
+// (flavor only — no school buildings). Tower level N unlocks spell level N;
+// casting a level-N spell kills N wizards.
+export type SpellSchool =
+  | 'abjuration' | 'conjuration' | 'divination' | 'enchantment'
+  | 'evocation' | 'illusion' | 'necromancy' | 'transmutation' | 'universal';
+
+// buff   = timed aura (durationHours); charge = consumed by the next
+// applicable mission/raid resolution; instant = applies on cast (haste and
+// teleport additionally need a target mission).
+export type SpellKind = 'buff' | 'charge' | 'instant';
 
 export interface SpellDef {
   id: string;
   name: string;
   school: SpellSchool;
-  tier: 1 | 2 | 3 | 4 | 5;
+  level: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+  kind: SpellKind;
   description: string;
-  // Timed buffs last this many real-world hours; undefined = instant/charge.
   durationHours?: number;
   // Multiplier added to province defense while active (0.1 = +10%).
   defenseBonus?: number;
-  // Aegis Dome: raids during the buff are repelled without a battle.
-  repelRaids?: boolean;
-  // Watchful Wards: incoming raids are announced 30 minutes ahead.
+  // Incoming raids are announced 30 minutes ahead while active.
   raidWarning?: boolean;
 }
 
@@ -56,10 +61,13 @@ export interface RaidReport {
 }
 
 export interface SpellState {
-  // Built schools and their level (1-5). Tower level 1 grants defence at 1.
-  schools: Partial<Record<SpellSchool, number>>;
   researched: string[];
   buffs: ActiveBuff[];
+  // Pending charge-spells (max one of each), consumed by the next
+  // applicable mission or raid resolution.
+  charges: string[];
+  // Troop losses of the last resolved siege — fuel for Heal.
+  lastLosses: number;
   // Next NPC raid, ms epoch. 0 = not scheduled yet (set on first tick).
   nextRaidAt: number;
   lastRaid: RaidReport | null;
@@ -173,9 +181,10 @@ const initialState: GameState = {
   },
   wizards: 0,
   spells: {
-    schools: {},
     researched: [],
     buffs: [],
+    charges: [],
+    lastLosses: 0,
     nextRaidAt: 0,
     lastRaid: null,
   },
@@ -228,7 +237,9 @@ export const serverClock = reactive<{
   haveSync: boolean;       // false until first successful /api/time call
 }>({ isNight: false, serverHour: 0, syncedAt: 0, haveSync: false });
 
-export const isNight = (): boolean => serverClock.isNight;
+// The Darkness spell makes it count as night everywhere isNight is consulted
+// (vampire combat, worker productivity, blood doll drip, ...).
+export const isNight = (): boolean => serverClock.isNight || isBuffActive('darkness');
 
 // Per-race peasant militia contribution to the army totals (per population point).
 // Vampires: peasants don't attack but defend hard; they can defend day or night.
@@ -600,10 +611,6 @@ export const constructBuilding = (type: BuildingType) => {
     store.resources.Gold -= cost.Gold;
     store.resources.Wood -= cost.Wood;
     store.buildings[type]++;
-    // The tower's first level comes with the Defence school built in.
-    if (type === 'WizardTower' && !store.spells.schools.defence) {
-      store.spells.schools.defence = 1;
-    }
     store.player.actionPoints--;
   }
 };
@@ -756,11 +763,15 @@ export const launchSlaver = () => {
 const resolveAttack = (a: AttackMission) => {
   const troops = a.tier1 + a.tier2 + a.tier3;
   if (a.type === 'siege') {
+    // Meteor Swarm: this siege loses nobody, before any other loss math.
+    const meteor = consumeCharge('meteor_swarm');
     let lossPct = 0.1;
-    if (hasResearch('inferno') || hasHero('dragon_rider')) lossPct = 0;
+    if (meteor || hasResearch('inferno') || hasHero('dragon_rider')) lossPct = 0;
     else if (hasResearch('spark')) lossPct = 0.05;
     if (hasHero('cunning_tactician')) lossPct *= 0.5;
     const losses = Math.ceil(troops * lossPct);
+    // Fuel for the Heal spell (75% of the last siege's losses).
+    store.spells.lastLosses = losses;
 
     let gain = Math.floor(troops / 3);
     if (hasResearch('fireball')) gain += 5;
@@ -768,6 +779,9 @@ const resolveAttack = (a: AttackMission) => {
     if (hasResearch('war_banners')) gain = Math.floor(gain * 1.5);
     if (hasHero('war_general')) gain = Math.floor(gain * 1.5);
     if (hasResearch('siegecraft')) gain = Math.floor(gain * 1.25);
+    if (meteor) gain = Math.floor(gain * 1.5);
+    if (consumeCharge('fireball_spell')) gain = Math.floor(gain * 1.25);
+    if (consumeCharge('magic_missile')) gain = Math.floor(gain * 1.1);
 
     // Losses hit the lowest tier first, then the survivors march home.
     const survivors = { tier1: a.tier1, tier2: a.tier2, tier3: a.tier3 };
@@ -787,7 +801,8 @@ const resolveAttack = (a: AttackMission) => {
     store.military.tier3 += survivors.tier3;
     store.province.acres += gain;
   } else if (a.type === 'raid') {
-    const rolls = hasResearch('pillaging') ? Math.floor(troops * 1.25) : troops;
+    let rolls = hasResearch('pillaging') ? Math.floor(troops * 1.25) : troops;
+    if (consumeCharge('magic_missile')) rolls = Math.floor(rolls * 1.1);
     const weights: [Resource, number][] = [
       ['Iron', 3], ['Wood', 3], ['Food', 1], ['Gold', 1], ['Mana', 1],
     ];
@@ -805,7 +820,8 @@ const resolveAttack = (a: AttackMission) => {
     store.military.tier3 += a.tier3;
   } else {
     // Slaver: the party was consumed at launch; only the captives arrive.
-    const captured = hasResearch('manhunters') ? 100 : 75;
+    let captured = hasResearch('manhunters') ? 100 : 75;
+    if (consumeCharge('magic_missile')) captured = Math.floor(captured * 1.1);
     const maxPop = store.buildings.Housing * popPerHousing();
     store.province.population = Math.min(maxPop, store.province.population + captured);
     if (store.player.race === 'Vampire') store.resources.Food += captured;
@@ -822,50 +838,54 @@ export const resolveDueAttacks = () => {
   markAction();
 };
 
-// ── Wizard Tower: schools, spells, casting ──────────────────────────────
-export const WIZARD_TOWER_MAX_LEVEL = 5;
+// ── Wizard Tower: spellbook and casting ─────────────────────────────────
+export const WIZARD_TOWER_MAX_LEVEL = 9;
 export const WIZARDS_PER_TOWER_LEVEL = 3;
-export const SCHOOL_MAX_LEVEL = 5;
 
 export const SPELLS: Record<string, SpellDef> = {
-  // Defence school (phase 1). Timed buffs: tier = duration in hours.
-  stone_skin:      { id: 'stone_skin',      name: 'Stone Skin',      school: 'defence', tier: 1, durationHours: 1, defenseBonus: 0.10, description: 'Province defense +10% for 1h' },
-  arcane_barrier:  { id: 'arcane_barrier',  name: 'Arcane Barrier',  school: 'defence', tier: 2, durationHours: 2, defenseBonus: 0.20, description: 'Province defense +20% for 2h' },
-  watchful_wards:  { id: 'watchful_wards',  name: 'Watchful Wards',  school: 'defence', tier: 3, durationHours: 3, defenseBonus: 0.30, raidWarning: true, description: 'Defense +30% for 3h and incoming raids are announced 30 min ahead' },
-  bulwark_of_mist: { id: 'bulwark_of_mist', name: 'Bulwark of Mist', school: 'defence', tier: 4, durationHours: 4, defenseBonus: 0.50, description: 'Province defense +50% for 4h' },
-  aegis_dome:      { id: 'aegis_dome',      name: 'Aegis Dome',      school: 'defence', tier: 5, durationHours: 5, repelRaids: true, description: 'Raids are repelled without a battle for 5h' },
+  // Level 1
+  magic_missile: { id: 'magic_missile', name: 'Magic Missile', school: 'evocation',  level: 1, kind: 'charge', description: 'Next mission to return: +10% yield' },
+  alarm:         { id: 'alarm',         name: 'Alarm',          school: 'abjuration', level: 1, kind: 'buff', durationHours: 4, raidWarning: true, description: 'Incoming raids announced 30 min ahead for 4h' },
+  // Level 2
+  mirror_image:  { id: 'mirror_image',  name: 'Mirror Image',   school: 'illusion',   level: 2, kind: 'buff', durationHours: 2, defenseBonus: 0.20, description: 'Province defense +20% for 2h' },
+  darkness:      { id: 'darkness',      name: 'Darkness',       school: 'evocation',  level: 2, kind: 'buff', durationHours: 1, description: 'Counts as night for 1h' },
+  // Level 3 — note: the spell is distinct from the 'fireball' RESEARCH node.
+  fireball_spell: { id: 'fireball_spell', name: 'Fireball', school: 'evocation',     level: 3, kind: 'charge', description: 'Next siege to return: +25% acres' },
+  haste:          { id: 'haste',          name: 'Haste',    school: 'transmutation', level: 3, kind: 'instant', description: 'A mission already underway resolves 1h sooner' },
+  // Level 4
+  wall_of_fire:      { id: 'wall_of_fire',      name: 'Wall of Fire',      school: 'evocation', level: 4, kind: 'buff', durationHours: 3, defenseBonus: 0.35, description: 'Province defense +35% for 3h' },
+  phantasmal_killer: { id: 'phantasmal_killer', name: 'Phantasmal Killer', school: 'illusion',  level: 4, kind: 'charge', description: 'Next raid: the warband flees in terror and you loot its camp' },
+  // Level 5
+  wall_of_stone: { id: 'wall_of_stone', name: 'Wall of Stone', school: 'conjuration', level: 5, kind: 'buff', durationHours: 4, defenseBonus: 0.50, description: 'Province defense +50% for 4h' },
+  teleport:      { id: 'teleport',      name: 'Teleport',      school: 'conjuration', level: 5, kind: 'instant', description: 'A mission already underway resolves 2h sooner' },
+  // Level 6
+  guards_and_wards: { id: 'guards_and_wards', name: 'Guards and Wards', school: 'abjuration',  level: 6, kind: 'buff', durationHours: 6, defenseBonus: 0.50, raidWarning: true, description: 'Defense +50% and raids announced for 6h' },
+  heal:             { id: 'heal',             name: 'Heal',             school: 'conjuration', level: 6, kind: 'instant', description: "Revive 75% of your last siege's losses as Tier 1" },
+  // Level 7
+  control_weather: { id: 'control_weather', name: 'Control Weather', school: 'transmutation', level: 7, kind: 'buff', durationHours: 8, description: 'ALL resource production +25% for 8h' },
+  insanity:        { id: 'insanity',        name: 'Insanity',        school: 'enchantment',   level: 7, kind: 'charge', description: 'Next raid: the warband turns on itself — automatic win, loot its full strength' },
+  // Level 8
+  moment_of_prescience: { id: 'moment_of_prescience', name: 'Moment of Prescience', school: 'divination', level: 8, kind: 'charge', description: 'Next raid is automatically won' },
+  clone:                { id: 'clone',                name: 'Clone',                school: 'necromancy', level: 8, kind: 'buff', durationHours: 6, description: '50% chance casting consumes no wizards, for 6h' },
+  // Level 9
+  time_stop:    { id: 'time_stop',    name: 'Time Stop',    school: 'transmutation', level: 9, kind: 'instant', description: 'ALL missions underway resolve 2h sooner' },
+  meteor_swarm: { id: 'meteor_swarm', name: 'Meteor Swarm', school: 'evocation',     level: 9, kind: 'charge', description: 'Next siege to return: zero losses and +50% acres' },
 };
 
-// Per-tier costs. Research is one-time; casting also kills `tier` wizards.
+// Per-level costs (index = spell level). Research is one-time; casting also
+// kills `level` wizards.
 export const SPELL_RESEARCH_COST: Record<number, { Gold: number; Mana: number }> = {
-  1: { Gold: 500, Mana: 50 }, 2: { Gold: 1500, Mana: 150 }, 3: { Gold: 4000, Mana: 400 },
-  4: { Gold: 8000, Mana: 800 }, 5: { Gold: 15000, Mana: 1500 },
+  1: { Gold: 500, Mana: 50 },    2: { Gold: 1500, Mana: 150 },  3: { Gold: 3000, Mana: 300 },
+  4: { Gold: 5000, Mana: 500 },  5: { Gold: 8000, Mana: 800 },  6: { Gold: 12000, Mana: 1200 },
+  7: { Gold: 17000, Mana: 1700 }, 8: { Gold: 23000, Mana: 2300 }, 9: { Gold: 30000, Mana: 3000 },
 };
-export const SPELL_CAST_MANA: Record<number, number> = { 1: 50, 2: 100, 3: 200, 4: 400, 5: 800 };
+export const SPELL_CAST_MANA: Record<number, number> = {
+  1: 50, 2: 100, 3: 200, 4: 350, 5: 600, 6: 1000, 7: 1600, 8: 2500, 9: 4000,
+};
 
 export const WIZARD_COST = { Gold: 500, Mana: 50 };
 
 export const wizardCap = () => store.buildings.WizardTower * WIZARDS_PER_TOWER_LEVEL;
-
-export const schoolLevel = (school: SpellSchool) => store.spells.schools[school] ?? 0;
-
-// School level is capped by tower level: a tier-5 spell needs tower 5.
-export const schoolUpgradeCost = (currentLevel: number) => ({
-  Gold: 1000 * Math.pow(2, currentLevel - 1),
-  Mana: 100 * Math.pow(2, currentLevel - 1),
-});
-
-export const upgradeSchool = (school: SpellSchool) => {
-  const level = schoolLevel(school);
-  if (level === 0) return; // school not built (phase 2: building new schools)
-  if (level >= SCHOOL_MAX_LEVEL || level >= store.buildings.WizardTower) return;
-  const cost = schoolUpgradeCost(level);
-  if (store.resources.Gold < cost.Gold || store.resources.Mana < cost.Mana) return;
-  store.resources.Gold -= cost.Gold;
-  store.resources.Mana -= cost.Mana;
-  store.spells.schools[school] = level + 1;
-  markAction();
-};
 
 export const trainWizard = () => {
   if (store.buildings.WizardTower < 1) return;
@@ -885,14 +905,14 @@ export const hasSpell = (spellId: string) => store.spells.researched.includes(sp
 export const canResearchSpell = (spellId: string) => {
   const spell = SPELLS[spellId];
   if (!spell || hasSpell(spellId)) return false;
-  if (schoolLevel(spell.school) < spell.tier) return false;
-  const cost = SPELL_RESEARCH_COST[spell.tier];
+  if (store.buildings.WizardTower < spell.level) return false;
+  const cost = SPELL_RESEARCH_COST[spell.level];
   return store.resources.Gold >= cost.Gold && store.resources.Mana >= cost.Mana;
 };
 
 export const researchSpell = (spellId: string) => {
   if (!canResearchSpell(spellId)) return;
-  const cost = SPELL_RESEARCH_COST[SPELLS[spellId].tier];
+  const cost = SPELL_RESEARCH_COST[SPELLS[spellId].level];
   store.resources.Gold -= cost.Gold;
   store.resources.Mana -= cost.Mana;
   store.spells.researched.push(spellId);
@@ -902,25 +922,59 @@ export const researchSpell = (spellId: string) => {
 export const isBuffActive = (spellId: string) =>
   store.spells.buffs.some(b => b.spellId === spellId && b.expiresAt > Date.now());
 
-export const canCastSpell = (spellId: string) => {
-  const spell = SPELLS[spellId];
-  if (!spell || !hasSpell(spellId)) return false;
-  if (isBuffActive(spellId)) return false; // no stacking the same buff
-  return store.wizards >= spell.tier && store.resources.Mana >= SPELL_CAST_MANA[spell.tier];
+export const hasCharge = (spellId: string) => store.spells.charges.includes(spellId);
+
+// Consumes the charge if pending. Returns whether it fired.
+const consumeCharge = (spellId: string) => {
+  const idx = store.spells.charges.indexOf(spellId);
+  if (idx === -1) return false;
+  store.spells.charges.splice(idx, 1);
+  return true;
 };
 
-export const castSpell = (spellId: string) => {
-  if (!canCastSpell(spellId)) return;
+export const canCastSpell = (spellId: string, targetMissionId?: string) => {
   const spell = SPELLS[spellId];
-  store.resources.Mana -= SPELL_CAST_MANA[spell.tier];
-  // Casting consumes the wizards — they're population, so the deaths shrink it.
-  store.wizards -= spell.tier;
-  store.province.population = Math.max(0, store.province.population - spell.tier);
-  if (spell.durationHours) {
+  if (!spell || !hasSpell(spellId)) return false;
+  if (spell.kind === 'buff' && isBuffActive(spellId)) return false; // no stacking
+  if (spell.kind === 'charge' && hasCharge(spellId)) return false;  // one pending each
+  if (spellId === 'haste' || spellId === 'teleport') {
+    if (!targetMissionId || !store.attacks.some(a => a.id === targetMissionId)) return false;
+  }
+  if (spellId === 'time_stop' && store.attacks.length === 0) return false;
+  if (spellId === 'heal' && store.spells.lastLosses < 1) return false;
+  return store.wizards >= spell.level && store.resources.Mana >= SPELL_CAST_MANA[spell.level];
+};
+
+export const castSpell = (spellId: string, targetMissionId?: string) => {
+  if (!canCastSpell(spellId, targetMissionId)) return;
+  const spell = SPELLS[spellId];
+  store.resources.Mana -= SPELL_CAST_MANA[spell.level];
+  // Casting consumes the wizards (they're population, so the deaths shrink
+  // it) — unless Clone saves them on a coin flip.
+  const cloneSaves = isBuffActive('clone') && Math.random() < 0.5;
+  if (!cloneSaves) {
+    store.wizards -= spell.level;
+    store.province.population = Math.max(0, store.province.population - spell.level);
+  }
+  if (spell.kind === 'buff' && spell.durationHours) {
     store.spells.buffs.push({
       spellId,
       expiresAt: Date.now() + spell.durationHours * 60 * 60 * 1000,
     });
+  } else if (spell.kind === 'charge') {
+    store.spells.charges.push(spellId);
+  } else {
+    // Instants.
+    const hourMs = 60 * 60 * 1000;
+    if (spellId === 'haste' || spellId === 'teleport') {
+      const mission = store.attacks.find(a => a.id === targetMissionId);
+      if (mission) mission.endsAt -= (spellId === 'haste' ? 1 : 2) * hourMs;
+    } else if (spellId === 'time_stop') {
+      for (const mission of store.attacks) mission.endsAt -= 2 * hourMs;
+    } else if (spellId === 'heal') {
+      store.military.tier1 += Math.floor(store.spells.lastLosses * 0.75);
+      store.spells.lastLosses = 0;
+    }
   }
   markAction();
 };
@@ -966,17 +1020,20 @@ export const provinceDefense = () => {
 };
 
 const resolveRaid = () => {
-  const repelled = store.spells.buffs.some(
-    b => b.expiresAt > Date.now() && SPELLS[b.spellId]?.repelRaids
-  );
   const strength = Math.floor(store.province.acres * 2 * (0.8 + Math.random() * 0.4));
   const defense = provinceDefense();
-  const won = repelled || defense >= strength;
+  // Charge-spells can decide the raid before a battle. Strongest fires
+  // first; only one charge is consumed per raid.
+  let autoWin: 'insanity' | 'moment_of_prescience' | 'phantasmal_killer' | null = null;
+  if (consumeCharge('insanity')) autoWin = 'insanity';
+  else if (consumeCharge('moment_of_prescience')) autoWin = 'moment_of_prescience';
+  else if (consumeCharge('phantasmal_killer')) autoWin = 'phantasmal_killer';
+
+  const won = autoWin !== null || defense >= strength;
   let lootGold = 0;
-  if (repelled) {
-    // Aegis Dome turns them away before a fight — nothing gained or lost.
-  } else if (won) {
-    lootGold = Math.floor(strength / 2);
+  if (won) {
+    // Insanity: the warband destroys itself and you take everything.
+    lootGold = autoWin === 'insanity' ? strength : Math.floor(strength / 2);
     store.resources.Gold += lootGold;
   } else {
     (Object.keys(store.resources) as Resource[]).forEach(res => {
@@ -985,7 +1042,8 @@ const resolveRaid = () => {
     store.blood = Math.floor(store.blood * 0.9);
     store.province.population = Math.floor(store.province.population * 0.95);
   }
-  store.spells.lastRaid = { at: Date.now(), strength, defense, won, repelled, lootGold };
+  // `repelled` = won by magic before any battle.
+  store.spells.lastRaid = { at: Date.now(), strength, defense, won, repelled: autoWin !== null, lootGold };
 };
 
 export const tickRaids = () => {
@@ -1050,7 +1108,7 @@ export const startGame = (extraResources: Resource[]) => {
   store.attacks = [];
   store.buildings.WizardTower = 0;
   store.wizards = 0;
-  store.spells = { schools: {}, researched: [], buffs: [], nextRaidAt: 0, lastRaid: null };
+  store.spells = { researched: [], buffs: [], charges: [], lastLosses: 0, nextRaidAt: 0, lastRaid: null };
   store.player.spies = 0;
   store.blooddolls = 0;
   store.blood = 0;
@@ -1112,6 +1170,7 @@ export const collectResources = () => {
       }
       if (hasResearch('industrial_revolution')) mult *= 1.25;
       if (hasResearch('elemental_pact')) mult *= 1.5;
+      if (isBuffActive('control_weather')) mult *= 1.25;
 
       let produced = base * mult;
       // Vampire ghouls (= basic workers) labor at half the speed of mortal workers.

@@ -46,9 +46,10 @@ function snapshot(state: GameState): SaveableState {
     attacks: state.attacks.map(a => ({ ...a })),
     wizards: state.wizards,
     spells: {
-      schools: { ...state.spells.schools },
       researched: [...state.spells.researched],
       buffs: state.spells.buffs.map(b => ({ ...b })),
+      charges: [...state.spells.charges],
+      lastLosses: state.spells.lastLosses,
       nextRaidAt: state.spells.nextRaidAt,
       lastRaid: state.spells.lastRaid ? { ...state.spells.lastRaid } : null,
     },
@@ -126,9 +127,10 @@ export function applyLoadedState(loaded: Partial<GameState>) {
   if (typeof loaded.wizards === 'number') store.wizards = loaded.wizards;
   if (loaded.spells) {
     store.spells = {
-      schools: { ...loaded.spells.schools },
       researched: [...(loaded.spells.researched ?? [])],
       buffs: (loaded.spells.buffs ?? []).map(b => ({ ...b })),
+      charges: [...(loaded.spells.charges ?? [])],
+      lastLosses: loaded.spells.lastLosses ?? 0,
       nextRaidAt: loaded.spells.nextRaidAt ?? 0,
       lastRaid: loaded.spells.lastRaid ? { ...loaded.spells.lastRaid } : null,
     };

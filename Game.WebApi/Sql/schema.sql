@@ -175,13 +175,18 @@ CREATE TABLE IF NOT EXISTS PlayerWizardry (
     LastRaidJson TEXT NULL
 );
 
--- Built schools of magic and their level (1-5). School codes are
--- client-defined strings ('defence', 'attack', ...) like spell ids below.
-CREATE TABLE IF NOT EXISTS PlayerSpellSchools (
+-- PlayerSpellSchools existed briefly (school-slot design, superseded by
+-- D&D-style flat spell levels the same day). The table may exist in old DBs
+-- but is no longer read or written.
+
+-- Pending charge-spells. The special ChargeId '_last_losses' stores the
+-- last siege's troop losses in Value (fuel for the Heal spell); real
+-- charges use Value 1.
+CREATE TABLE IF NOT EXISTS PlayerSpellCharges (
     PlayerId TEXT    NOT NULL REFERENCES Players(Id) ON DELETE CASCADE,
-    School   TEXT    NOT NULL,
-    Level    INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (PlayerId, School)
+    ChargeId TEXT    NOT NULL,
+    Value    INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (PlayerId, ChargeId)
 );
 
 CREATE TABLE IF NOT EXISTS PlayerSpells (

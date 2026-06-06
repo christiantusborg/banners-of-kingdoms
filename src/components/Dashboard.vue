@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { store, Resource, manualCollect, addWorker, removeWorker, WorkerType, getTotalWorkers, adjustSpies, adjustBlooddolls, trainTroop, promoteTroop, TROOP_CONFIG, constructBuilding, explore, launchSiege, launchRaid, launchSlaver, attackSlots, attackDurationMs, landUsed, tradeResources, effectiveBuildingCost, effectiveBuildingLand, getTradeRatio, popPerHousing, workerCapPerBuilding, troopAttackBonus, troopDefenseBonus, troopMultiplier, hasResearch, getApRegenSeconds, RESEARCH, isResearchAvailable, researchUnlock, effectiveResearchCost, trainingCost, ResearchBranch, HEROES, HeroRarity, hasHero, hireHero, dismissHero, canHireHero, heroSlotsTotal, heroSlotsUsed, heroSlotsFree, TAVERN_NAMES, TAVERN_MAX_LEVEL, isNight, PEASANT_COMBAT, troopsCombatActive, pandaAvailable, vampireCanSpendPop, vampirePrisoners, barracksCapacity, bloodCostFor, hasEnoughBlood, WIZARD_TOWER_MAX_LEVEL, SCHOOL_MAX_LEVEL, WIZARDS_PER_TOWER_LEVEL, SPELLS, SPELL_RESEARCH_COST, SPELL_CAST_MANA, WIZARD_COST, wizardCap, schoolLevel, schoolUpgradeCost, upgradeSchool, trainWizard, hasSpell, canResearchSpell, researchSpell, isBuffActive, canCastSpell, castSpell, provinceDefense, RAID_WARNING_MS } from '../store/gameStore';
+import { store, Resource, manualCollect, addWorker, removeWorker, WorkerType, getTotalWorkers, adjustSpies, adjustBlooddolls, trainTroop, promoteTroop, TROOP_CONFIG, constructBuilding, explore, launchSiege, launchRaid, launchSlaver, attackSlots, attackDurationMs, landUsed, tradeResources, effectiveBuildingCost, effectiveBuildingLand, getTradeRatio, popPerHousing, workerCapPerBuilding, troopAttackBonus, troopDefenseBonus, troopMultiplier, hasResearch, getApRegenSeconds, RESEARCH, isResearchAvailable, researchUnlock, effectiveResearchCost, trainingCost, ResearchBranch, HEROES, HeroRarity, hasHero, hireHero, dismissHero, canHireHero, heroSlotsTotal, heroSlotsUsed, heroSlotsFree, TAVERN_NAMES, TAVERN_MAX_LEVEL, isNight, PEASANT_COMBAT, troopsCombatActive, pandaAvailable, vampireCanSpendPop, vampirePrisoners, barracksCapacity, bloodCostFor, hasEnoughBlood, WIZARD_TOWER_MAX_LEVEL, WIZARDS_PER_TOWER_LEVEL, SPELLS, SPELL_RESEARCH_COST, SPELL_CAST_MANA, WIZARD_COST, wizardCap, trainWizard, hasSpell, canResearchSpell, researchSpell, isBuffActive, hasCharge, canCastSpell, castSpell, provinceDefense, RAID_WARNING_MS } from '../store/gameStore';
 import type { AttackMission } from '../store/gameStore';
 import { saveGame } from '../services/api';
 import { computed, ref, watch } from 'vue';
@@ -148,9 +148,14 @@ const visibleResources = computed<Resource[]>(() => {
 const activeTab = ref<'empire' | 'research' | 'tavern' | 'tower'>('empire');
 
 // ── Wizard Tower helpers ─────────────────────────────────────────────────
-const defenceSpells = computed(() =>
-  Object.values(SPELLS).filter(s => s.school === 'defence').sort((a, b) => a.tier - b.tier)
-);
+const spellbook = computed(() => Object.values(SPELLS).sort((a, b) => a.level - b.level));
+const SCHOOL_LABELS: Record<string, string> = {
+  abjuration: '🛡 Abjuration', conjuration: '✨ Conjuration', divination: '🔮 Divination',
+  enchantment: '💫 Enchantment', evocation: '🔥 Evocation', illusion: '🎭 Illusion',
+  necromancy: '💀 Necromancy', transmutation: '🌿 Transmutation', universal: '⭐ Universal',
+};
+// Haste and Teleport are cast ON a mission underway; the rest cast plain.
+const needsMissionTarget = (id: string) => id === 'haste' || id === 'teleport';
 const towerLevel = computed(() => store.buildings.WizardTower);
 // store.lastTick keeps these counting down once a second.
 const buffRemaining = (spellId: string) => {
@@ -174,7 +179,7 @@ const lastRaidText = computed(() => {
   const r = store.spells.lastRaid;
   if (!r) return '';
   const when = new Date(r.at).toLocaleString();
-  if (r.repelled) return `${when} — warband repelled by Aegis Dome`;
+  if (r.repelled) return `${when} — warband undone by magic before the battle, looted ${r.lootGold}g`;
   if (r.won) return `${when} — raid defeated (${r.defense} def vs ${r.strength}), looted ${r.lootGold}g`;
   return `${when} — raid LOST (${r.defense} def vs ${r.strength}): -10% resources, -5% population`;
 });
@@ -997,8 +1002,8 @@ const costLabel = (r: ResearchDef) => {
             </p>
             <p v-if="towerLevel === 0" class="text-sm text-slate-400 mt-2 max-w-lg">
               Raiders prowl these lands — every province is attacked sooner or later. The tower's
-              Defence school wards your people. Each tower level houses {{ WIZARDS_PER_TOWER_LEVEL }} wizards
-              and raises the school's maximum level.
+              magic wards your people. Each tower level houses {{ WIZARDS_PER_TOWER_LEVEL }} wizards
+              and unlocks that level of spells (up to level {{ WIZARD_TOWER_MAX_LEVEL }}).
             </p>
           </div>
           <div v-if="towerLevel < WIZARD_TOWER_MAX_LEVEL" class="flex flex-col items-end gap-1">
@@ -1037,58 +1042,59 @@ const costLabel = (r: ResearchDef) => {
         </div>
       </div>
 
-      <!-- Defence school -->
+      <!-- Spellbook -->
       <div v-if="towerLevel > 0" class="bg-slate-800 p-6 rounded-2xl border-2 border-sky-900/50">
-        <div class="flex justify-between items-start mb-4">
-          <h3 class="text-2xl font-bold text-sky-400">🛡 Defence School <span class="text-sm text-slate-500 font-normal">Lv {{ schoolLevel('defence') }}</span></h3>
-          <div v-if="schoolLevel('defence') < SCHOOL_MAX_LEVEL" class="flex flex-col items-end gap-1">
-            <button
-              @click="upgradeSchool('defence')"
-              :disabled="schoolLevel('defence') >= towerLevel || store.resources.Gold < schoolUpgradeCost(schoolLevel('defence')).Gold || store.resources.Mana < schoolUpgradeCost(schoolLevel('defence')).Mana"
-              class="px-3 py-1.5 bg-sky-700 hover:bg-sky-600 disabled:opacity-30 rounded-lg text-xs font-bold"
-            >
-              Upgrade school
-            </button>
-            <p class="text-[10px] text-slate-500">
-              {{ schoolUpgradeCost(schoolLevel('defence')).Gold }}g + {{ schoolUpgradeCost(schoolLevel('defence')).Mana }}m
-              <span v-if="schoolLevel('defence') >= towerLevel" class="text-rose-400"> · needs tower Lv {{ schoolLevel('defence') + 1 }}</span>
-            </p>
-          </div>
-        </div>
-        <p class="text-[11px] text-slate-500 mb-3">Spell tier N requires school level N. Other schools of magic open as the tower grows (coming soon).</p>
+        <h3 class="text-2xl font-bold text-sky-400 mb-1">📖 Spellbook</h3>
+        <p class="text-[11px] text-slate-500 mb-3">Spell level N requires tower level N. Casting a level-N spell costs mana and the lives of N wizards.</p>
         <div class="flex flex-col gap-2">
           <div
-            v-for="spell in defenceSpells"
+            v-for="spell in spellbook"
             :key="spell.id"
-            class="bg-slate-900/50 p-3 rounded-xl border border-slate-700 flex justify-between items-center gap-4"
+            :class="['bg-slate-900/50 p-3 rounded-xl border flex justify-between items-center gap-4', towerLevel >= spell.level ? 'border-slate-700' : 'border-slate-800 opacity-50']"
           >
             <div>
               <p class="font-bold text-slate-200 text-sm">
-                T{{ spell.tier }} · {{ spell.name }}
+                <span class="text-indigo-400 font-mono">L{{ spell.level }}</span> · {{ spell.name }}
+                <span class="text-[10px] text-slate-500 font-normal ml-1">{{ SCHOOL_LABELS[spell.school] }}</span>
                 <span v-if="isBuffActive(spell.id)" class="text-emerald-400 text-xs ml-1">● active {{ buffRemaining(spell.id) }}</span>
+                <span v-else-if="hasCharge(spell.id)" class="text-amber-400 text-xs ml-1">⚡ charged</span>
               </p>
               <p class="text-[11px] text-slate-400">{{ spell.description }}</p>
             </div>
             <div class="text-right shrink-0">
               <template v-if="!hasSpell(spell.id)">
                 <button
-                  v-if="schoolLevel('defence') >= spell.tier"
+                  v-if="towerLevel >= spell.level"
                   @click="researchSpell(spell.id)"
                   :disabled="!canResearchSpell(spell.id)"
                   class="px-3 py-1.5 bg-amber-700 hover:bg-amber-600 disabled:opacity-30 rounded-lg text-xs font-bold"
                 >
-                  Research ({{ SPELL_RESEARCH_COST[spell.tier].Gold }}g + {{ SPELL_RESEARCH_COST[spell.tier].Mana }}m)
+                  Research ({{ SPELL_RESEARCH_COST[spell.level].Gold }}g + {{ SPELL_RESEARCH_COST[spell.level].Mana }}m)
                 </button>
-                <span v-else class="text-[10px] text-slate-500 italic">School Lv {{ spell.tier }} required</span>
+                <span v-else class="text-[10px] text-slate-500 italic">Tower Lv {{ spell.level }} required</span>
+              </template>
+              <template v-else-if="needsMissionTarget(spell.id)">
+                <div v-if="store.attacks.length" class="flex flex-col gap-1 items-end">
+                  <button
+                    v-for="a in store.attacks"
+                    :key="a.id"
+                    @click="castSpell(spell.id, a.id)"
+                    :disabled="!canCastSpell(spell.id, a.id)"
+                    class="px-3 py-1.5 bg-fuchsia-700 hover:bg-fuchsia-600 disabled:opacity-30 rounded-lg text-xs font-bold"
+                  >
+                    Cast on {{ attackLabel(a) }} ({{ attackEta(a) }}) — {{ SPELL_CAST_MANA[spell.level] }}m + {{ spell.level }}🧙
+                  </button>
+                </div>
+                <span v-else class="text-[10px] text-slate-500 italic">No mission underway</span>
               </template>
               <template v-else>
                 <button
                   @click="castSpell(spell.id)"
                   :disabled="!canCastSpell(spell.id)"
-                  :title="isBuffActive(spell.id) ? 'Already active' : store.wizards < spell.tier ? `Needs ${spell.tier} wizards` : ''"
+                  :title="isBuffActive(spell.id) ? 'Already active' : hasCharge(spell.id) ? 'Already charged' : store.wizards < spell.level ? `Needs ${spell.level} wizards` : ''"
                   class="px-3 py-1.5 bg-fuchsia-700 hover:bg-fuchsia-600 disabled:opacity-30 rounded-lg text-xs font-bold"
                 >
-                  Cast ({{ SPELL_CAST_MANA[spell.tier] }}m + {{ spell.tier }}🧙)
+                  Cast ({{ SPELL_CAST_MANA[spell.level] }}m + {{ spell.level }}🧙)
                 </button>
               </template>
             </div>
