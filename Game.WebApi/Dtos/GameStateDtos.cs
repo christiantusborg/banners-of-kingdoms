@@ -17,6 +17,7 @@ public class GameStateDto
     public string Phase { get; set; } = "CREATION_RACE";
     public List<string> Research { get; set; } = new();
     public List<string> Heroes { get; set; } = new();
+    public List<AttackDto> Attacks { get; set; } = new();
     // Vampire-specific sub-pop + resource. Always present so the round-trip
     // is symmetric for every race (non-vampires save/load these as 0).
     public int Blooddolls { get; set; }
@@ -52,4 +53,18 @@ public class WorkerStateDto
 {
     public int Basic { get; set; }
     public int Panda { get; set; }
+}
+
+// A timed attack mission. The game logic (launch costs, resolution rewards)
+// lives entirely in the frontend; the server just persists the missions so
+// they survive logout. Timestamps are ms-since-epoch to match Date.now().
+public class AttackDto
+{
+    public string Id { get; set; } = "";
+    public string Type { get; set; } = "";
+    public int Tier1 { get; set; }
+    public int Tier2 { get; set; }
+    public int Tier3 { get; set; }
+    public long StartedAt { get; set; }
+    public long EndsAt { get; set; }
 }

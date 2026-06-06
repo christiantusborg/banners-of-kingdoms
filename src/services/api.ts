@@ -15,6 +15,7 @@ interface SaveableState {
   phase: GameState['phase'];
   research: GameState['research'];
   heroes: GameState['heroes'];
+  attacks: GameState['attacks'];
   blooddolls: number;
   blood: number;
 }
@@ -40,6 +41,7 @@ function snapshot(state: GameState): SaveableState {
     phase: state.phase,
     research: [...state.research],
     heroes: [...state.heroes],
+    attacks: state.attacks.map(a => ({ ...a })),
     blooddolls: state.blooddolls,
     blood: state.blood,
   };
@@ -109,6 +111,8 @@ export function applyLoadedState(loaded: Partial<GameState>) {
   if (loaded.phase) store.phase = loaded.phase;
   if (loaded.research) store.research = [...loaded.research];
   if (loaded.heroes) store.heroes = [...loaded.heroes];
+  // Missions that finished while logged out resolve on the next tick.
+  if (loaded.attacks) store.attacks = loaded.attacks.map(a => ({ ...a }));
   if (typeof loaded.blooddolls === 'number') store.blooddolls = loaded.blooddolls;
   if (typeof loaded.blood === 'number') store.blood = loaded.blood;
   store.lastTick = Date.now();

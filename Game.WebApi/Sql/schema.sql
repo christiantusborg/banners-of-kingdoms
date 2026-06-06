@@ -165,6 +165,21 @@ CREATE TABLE IF NOT EXISTS PlayerHeroes (
     PRIMARY KEY (PlayerId, HeroId)
 );
 
+-- Timed attack missions in flight. Id is the frontend-generated mission id;
+-- StartedAt/EndsAt are ms since epoch (JS Date.now()) — resolution happens
+-- client-side, the server only persists missions across sessions.
+CREATE TABLE IF NOT EXISTS PlayerAttacks (
+    Id        TEXT    NOT NULL,
+    PlayerId  TEXT    NOT NULL REFERENCES Players(Id) ON DELETE CASCADE,
+    Type      TEXT    NOT NULL,
+    Tier1     INTEGER NOT NULL DEFAULT 0,
+    Tier2     INTEGER NOT NULL DEFAULT 0,
+    Tier3     INTEGER NOT NULL DEFAULT 0,
+    StartedAt INTEGER NOT NULL,
+    EndsAt    INTEGER NOT NULL,
+    PRIMARY KEY (PlayerId, Id)
+);
+
 -- =============================================================
 -- 3. Catalog seed data (small lookups only; heroes + research in their own files)
 -- =============================================================
@@ -197,7 +212,8 @@ INSERT OR IGNORE INTO ResearchBranches (Id, Name) VALUES
     (3, 'civic'),
     (4, 'construction'),
     (5, 'espionage'),
-    (6, 'magic');
+    (6, 'magic'),
+    (7, 'warfare');
 
 INSERT OR IGNORE INTO HeroRarities (Id, Name, SortOrder) VALUES
     (1, 'common',    1),

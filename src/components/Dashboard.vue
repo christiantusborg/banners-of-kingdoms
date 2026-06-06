@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { store, Resource, manualCollect, addWorker, removeWorker, WorkerType, getTotalWorkers, adjustSpies, adjustBlooddolls, trainTroop, promoteTroop, TROOP_CONFIG, constructBuilding, conquest, explore, kidnap, gatherResources, landUsed, tradeResources, effectiveBuildingCost, effectiveBuildingLand, getTradeRatio, popPerHousing, workerCapPerBuilding, troopAttackBonus, troopDefenseBonus, troopMultiplier, hasResearch, getApRegenSeconds, RESEARCH, isResearchAvailable, researchUnlock, effectiveResearchCost, trainingCost, ResearchBranch, HEROES, HeroRarity, hasHero, hireHero, dismissHero, canHireHero, heroSlotsTotal, heroSlotsUsed, heroSlotsFree, TAVERN_NAMES, TAVERN_MAX_LEVEL, isNight, PEASANT_COMBAT, troopsCombatActive, pandaAvailable, vampireCanSpendPop, vampirePrisoners, barracksCapacity, bloodCostFor, hasEnoughBlood } from '../store/gameStore';
+import { store, Resource, manualCollect, addWorker, removeWorker, WorkerType, getTotalWorkers, adjustSpies, adjustBlooddolls, trainTroop, promoteTroop, TROOP_CONFIG, constructBuilding, explore, launchSiege, launchRaid, launchSlaver, attackSlots, attackDurationMs, landUsed, tradeResources, effectiveBuildingCost, effectiveBuildingLand, getTradeRatio, popPerHousing, workerCapPerBuilding, troopAttackBonus, troopDefenseBonus, troopMultiplier, hasResearch, getApRegenSeconds, RESEARCH, isResearchAvailable, researchUnlock, effectiveResearchCost, trainingCost, ResearchBranch, HEROES, HeroRarity, hasHero, hireHero, dismissHero, canHireHero, heroSlotsTotal, heroSlotsUsed, heroSlotsFree, TAVERN_NAMES, TAVERN_MAX_LEVEL, isNight, PEASANT_COMBAT, troopsCombatActive, pandaAvailable, vampireCanSpendPop, vampirePrisoners, barracksCapacity, bloodCostFor, hasEnoughBlood } from '../store/gameStore';
+import type { AttackMission } from '../store/gameStore';
 import { saveGame } from '../services/api';
 import { computed, ref, watch } from 'vue';
 
@@ -61,6 +62,25 @@ const conquestPreview = computed(() => ({
 }));
 const explorePreview = computed(() => Math.floor(troopCount.value / 5));
 const landSummary = computed(() => ({ used: landUsed(), total: store.province.acres }));
+
+const attackHours = computed(() => attackDurationMs() / 3_600_000);
+const slotsFreeForAttack = computed(() => store.attacks.length < attackSlots());
+const attackLabel = (a: AttackMission) => {
+  if (a.type === 'siege') return 'Siege';
+  if (a.type === 'raid') return 'Raid';
+  return isVampire.value ? 'Plunder' : 'Slaver';
+};
+// store.lastTick advances every game tick, so this countdown re-renders
+// once a second without its own timer.
+const attackEta = (a: AttackMission) => {
+  const ms = Math.max(0, a.endsAt - store.lastTick);
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  const s = Math.floor((ms % 60_000) / 1000);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+};
 
 const tradeFrom = ref<Resource>(store.player.race === 'Vampire' ? 'Wood' : 'Food');
 const tradeTo = ref<Resource>(store.player.race === 'Vampire' ? 'Iron' : 'Iron');
@@ -176,12 +196,13 @@ const branchMeta: Record<ResearchBranch, { label: string; title: string; border:
   construction: { label: 'Construction', title: 'text-stone-400',   border: 'border-stone-700/50',   icon: '🏗️' },
   espionage:    { label: 'Espionage',    title: 'text-violet-400',  border: 'border-violet-900/50',  icon: '🕵️' },
   magic:        { label: 'Magic',        title: 'text-fuchsia-400', border: 'border-fuchsia-900/50', icon: '🔮' },
+  warfare:      { label: 'Warfare',      title: 'text-orange-400',  border: 'border-orange-900/50',  icon: '🏴' },
 };
-const branchOrder: ResearchBranch[] = ['military', 'economy', 'civic', 'construction', 'espionage', 'magic'];
+const branchOrder: ResearchBranch[] = ['military', 'warfare', 'economy', 'civic', 'construction', 'espionage', 'magic'];
 
 const researchByBranch = computed(() => {
   const out: Record<ResearchBranch, ResearchDef[]> = {
-    military: [], economy: [], civic: [], construction: [], espionage: [], magic: [],
+    military: [], economy: [], civic: [], construction: [], espionage: [], magic: [], warfare: [],
   };
   for (const r of Object.values(RESEARCH)) out[r.branch].push(r);
   return out;
@@ -577,20 +598,28 @@ const costLabel = (r: ResearchDef) => {
             <span class="text-rose-500">🪖</span> Troop Actions
           </h2>
           <div class="flex flex-col gap-3">
+            <div class="bg-slate-900/50 p-4 rounded-xl border border-slate-700">
+              <p class="font-bold text-slate-200 mb-1">Attacks Underway ({{ store.attacks.length }}/{{ attackSlots() }})</p>
+              <p v-if="store.attacks.length === 0" class="text-xs text-slate-500">No attacks running. Attacks resolve after {{ attackHours }} hours (real time) — gains arrive when the troops return.</p>
+              <div v-for="a in store.attacks" :key="a.id" class="flex justify-between items-center text-xs py-0.5">
+                <span class="text-slate-300">{{ attackLabel(a) }} · {{ a.tier1 + a.tier2 + a.tier3 }} troops</span>
+                <span class="text-amber-300 font-mono">⏳ {{ attackEta(a) }}</span>
+              </div>
+            </div>
             <div class="bg-slate-900/50 p-4 rounded-xl flex justify-between items-center border border-slate-700">
               <div>
-                <p class="font-bold text-slate-200">Conquest</p>
-                <p class="text-xs text-slate-500">Send all troops · +1 acre per 3 · lose 10%</p>
-                <p class="text-[10px] text-rose-300 mt-1">Now: +{{ conquestPreview.gain }} acres · -{{ conquestPreview.losses }} troops</p>
+                <p class="font-bold text-slate-200">Siege <span class="text-[10px] text-slate-500 font-normal">(was Conquest)</span></p>
+                <p class="text-xs text-slate-500">Send all troops · +1 acre per 3 · lose 10% · takes {{ attackHours }}h</p>
+                <p class="text-[10px] text-rose-300 mt-1">On return: +{{ conquestPreview.gain }} acres · -{{ conquestPreview.losses }} troops</p>
                 <p v-if="isVampire" class="text-[10px] text-rose-400 mt-1">🩸 Costs {{ attackBloodCost }} blood ({{ Math.floor(store.blood) }} available)</p>
               </div>
               <button
-                @click="conquest"
-                :disabled="store.player.actionPoints < 1 || troopCount < 3 || !hasEnoughBlood(troopCount)"
-                :title="isVampire && !hasEnoughBlood(troopCount) ? `Need ${attackBloodCost} blood, have ${Math.floor(store.blood)}` : ''"
+                @click="launchSiege"
+                :disabled="store.player.actionPoints < 1 || troopCount < 3 || !hasEnoughBlood(troopCount) || !slotsFreeForAttack"
+                :title="!slotsFreeForAttack ? 'All attack slots are in use' : isVampire && !hasEnoughBlood(troopCount) ? `Need ${attackBloodCost} blood, have ${Math.floor(store.blood)}` : ''"
                 class="px-4 py-2 bg-rose-700 hover:bg-rose-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
               >
-                Conquer (1 AP)
+                Siege (1 AP)
               </button>
             </div>
 
@@ -611,34 +640,34 @@ const costLabel = (r: ResearchDef) => {
 
             <div class="bg-slate-900/50 p-4 rounded-xl flex justify-between items-center border border-slate-700">
               <div>
-                <p class="font-bold text-slate-200">{{ isVampire ? 'Plunder Village' : 'Kidnap' }}</p>
-                <p v-if="isVampire" class="text-xs text-slate-500">+75 prisoners · +75 food · -{{ hasResearch('sabotage') ? 1 : 2 }} troops</p>
-                <p v-else class="text-xs text-slate-500">+75 population · -2 troops</p>
+                <p class="font-bold text-slate-200">{{ isVampire ? 'Plunder Village' : 'Slaver' }} <span class="text-[10px] text-slate-500 font-normal">(was Kidnap)</span></p>
+                <p v-if="isVampire" class="text-xs text-slate-500">+{{ hasResearch('manhunters') ? 100 : 75 }} prisoners · +{{ hasResearch('manhunters') ? 100 : 75 }} food · -{{ hasResearch('sabotage') ? 1 : 2 }} troops · takes {{ attackHours }}h</p>
+                <p v-else class="text-xs text-slate-500">+{{ hasResearch('manhunters') ? 100 : 75 }} population · -{{ hasResearch('sabotage') ? 1 : 2 }} troops · takes {{ attackHours }}h</p>
                 <p v-if="isVampire" class="text-[10px] text-rose-400 mt-1">🩸 Costs {{ kidnapBloodCost }} blood ({{ Math.floor(store.blood) }} available)</p>
               </div>
               <button
-                @click="kidnap"
-                :disabled="store.player.actionPoints < 1 || (store.military.tier1 + store.military.tier2 + store.military.tier3) < (hasResearch('sabotage') ? 1 : 2) || !hasEnoughBlood(hasResearch('sabotage') ? 1 : 2)"
-                :title="isVampire && !hasEnoughBlood(hasResearch('sabotage') ? 1 : 2) ? `Need ${kidnapBloodCost} blood, have ${Math.floor(store.blood)}` : ''"
+                @click="launchSlaver"
+                :disabled="store.player.actionPoints < 1 || (store.military.tier1 + store.military.tier2 + store.military.tier3) < (hasResearch('sabotage') ? 1 : 2) || !hasEnoughBlood(hasResearch('sabotage') ? 1 : 2) || !slotsFreeForAttack"
+                :title="!slotsFreeForAttack ? 'All attack slots are in use' : isVampire && !hasEnoughBlood(hasResearch('sabotage') ? 1 : 2) ? `Need ${kidnapBloodCost} blood, have ${Math.floor(store.blood)}` : ''"
                 class="px-4 py-2 bg-amber-700 hover:bg-amber-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
               >
-                {{ isVampire ? 'Plunder' : 'Kidnap' }} (1 AP)
+                {{ isVampire ? 'Plunder' : 'Slaver' }} (1 AP)
               </button>
             </div>
 
             <div class="bg-slate-900/50 p-4 rounded-xl flex justify-between items-center border border-slate-700">
               <div>
-                <p class="font-bold text-slate-200">Gather Resources</p>
-                <p class="text-xs text-slate-500">+1 random resource per troop · Iron &amp; Wood most likely</p>
+                <p class="font-bold text-slate-200">Raid <span class="text-[10px] text-slate-500 font-normal">(was Gather)</span></p>
+                <p class="text-xs text-slate-500">+1 random resource per troop · Iron &amp; Wood most likely · takes {{ attackHours }}h</p>
                 <p v-if="isVampire" class="text-[10px] text-rose-400 mt-1">🩸 Costs {{ attackBloodCost }} blood ({{ Math.floor(store.blood) }} available)</p>
               </div>
               <button
-                @click="gatherResources"
-                :disabled="store.player.actionPoints < 1 || (store.military.tier1 + store.military.tier2 + store.military.tier3) < 1 || !hasEnoughBlood(troopCount)"
-                :title="isVampire && !hasEnoughBlood(troopCount) ? `Need ${attackBloodCost} blood, have ${Math.floor(store.blood)}` : ''"
+                @click="launchRaid"
+                :disabled="store.player.actionPoints < 1 || (store.military.tier1 + store.military.tier2 + store.military.tier3) < 1 || !hasEnoughBlood(troopCount) || !slotsFreeForAttack"
+                :title="!slotsFreeForAttack ? 'All attack slots are in use' : isVampire && !hasEnoughBlood(troopCount) ? `Need ${attackBloodCost} blood, have ${Math.floor(store.blood)}` : ''"
                 class="px-4 py-2 bg-sky-700 hover:bg-sky-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
               >
-                Gather (1 AP)
+                Raid (1 AP)
               </button>
             </div>
           </div>

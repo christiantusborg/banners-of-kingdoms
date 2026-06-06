@@ -62,7 +62,14 @@ INSERT OR IGNORE INTO ResearchNodes (Id, Code, Name, BranchId, Tier, Slot, CostG
     (46, 'sanctuary',        'Sanctuary',        6, 4, 2, NULL,  800, 'Locked resources still produce at half rate'),
     (47, 'charm',            'Charm',            6, 4, 3, NULL,  800, 'Spies count as peasants for population attack/defense bonus'),
     (48, 'elemental_pact',   'Elemental Pact',   6, 4, 4, NULL, 1000, 'All resource production +50% (multiplicative)'),
-    (49, 'archmage',         'Archmage',         6, 5, 3, NULL, 2500, 'Capstone: +25% troop stats, +100 max AP');
+    (49, 'archmage',         'Archmage',         6, 5, 3, NULL, 2500, 'Capstone: +25% troop stats, +100 max AP'),
+
+    -- Warfare
+    (50, 'pillaging',    'Pillaging',    7, 1, 1, 1000, NULL, 'Raid yields +25% resources'),
+    (51, 'siegecraft',   'Siegecraft',   7, 1, 2, 1000, NULL, 'Siege gains +25% acres'),
+    (52, 'manhunters',   'Manhunters',   7, 1, 3, 1000, NULL, 'Slaver captures 100 population instead of 75'),
+    (53, 'forced_march', 'Forced March', 7, 2, 1, 3000, NULL, 'Attacks resolve in 4 hours instead of 5'),
+    (54, 'war_council',  'War Council',  7, 2, 2, 3000, NULL, '+1 simultaneous attack (4 total)');
 
 INSERT OR IGNORE INTO ResearchPrerequisites (ResearchId, PrerequisiteResearchId) VALUES
     -- Military
@@ -112,4 +119,8 @@ INSERT OR IGNORE INTO ResearchPrerequisites (ResearchId, PrerequisiteResearchId)
     (46, 42),                           -- sanctuary       <- greater_heal
     (47, 43),                           -- charm           <- minds_eye
     (48, 44), (48, 40),                 -- elemental_pact  <- conjure_familiar, scrying
-    (49, 45), (49, 46), (49, 47), (49, 48); -- archmage    <- inferno, sanctuary, charm, elemental_pact
+    (49, 45), (49, 46), (49, 47), (49, 48), -- archmage    <- inferno, sanctuary, charm, elemental_pact
+
+    -- Warfare
+    (53, 50),                           -- forced_march    <- pillaging
+    (54, 51);                           -- war_council     <- siegecraft

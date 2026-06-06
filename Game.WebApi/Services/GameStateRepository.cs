@@ -134,6 +134,21 @@ public class GameStateRepository
             new() { ["$pid"] = playerId }, ct))
             .Select(r => (string)r["Code"]).ToList();
 
+        dto.Attacks = (await QueryListAsync(conn,
+            @"SELECT Id, Type, Tier1, Tier2, Tier3, StartedAt, EndsAt
+              FROM PlayerAttacks WHERE PlayerId = $pid",
+            new() { ["$pid"] = playerId }, ct))
+            .Select(r => new AttackDto
+            {
+                Id = (string)r["Id"],
+                Type = (string)r["Type"],
+                Tier1 = Convert.ToInt32(r["Tier1"]),
+                Tier2 = Convert.ToInt32(r["Tier2"]),
+                Tier3 = Convert.ToInt32(r["Tier3"]),
+                StartedAt = Convert.ToInt64(r["StartedAt"]),
+                EndsAt = Convert.ToInt64(r["EndsAt"]),
+            }).ToList();
+
         return dto;
     }
 
@@ -288,6 +303,27 @@ public class GameStateRepository
                     "INSERT INTO PlayerHeroes (PlayerId, HeroId) VALUES ($pid, $h)",
                     new() { ["$pid"] = playerId, ["$h"] = hid }, ct);
             }
+        }
+
+        await ExecNonQueryAsync(conn, tx, "DELETE FROM PlayerAttacks WHERE PlayerId = $pid",
+            new() { ["$pid"] = playerId }, ct);
+        foreach (var attack in state.Attacks)
+        {
+            if (string.IsNullOrEmpty(attack.Id)) continue;
+            await ExecNonQueryAsync(conn, tx,
+                @"INSERT INTO PlayerAttacks (Id, PlayerId, Type, Tier1, Tier2, Tier3, StartedAt, EndsAt)
+                  VALUES ($id, $pid, $type, $t1, $t2, $t3, $start, $end)",
+                new()
+                {
+                    ["$id"] = attack.Id,
+                    ["$pid"] = playerId,
+                    ["$type"] = attack.Type,
+                    ["$t1"] = attack.Tier1,
+                    ["$t2"] = attack.Tier2,
+                    ["$t3"] = attack.Tier3,
+                    ["$start"] = attack.StartedAt,
+                    ["$end"] = attack.EndsAt,
+                }, ct);
         }
 
         await tx.CommitAsync(ct);

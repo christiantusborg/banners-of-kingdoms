@@ -34,6 +34,7 @@ INSERT OR IGNORE INTO Heroes (Id, Code, Name, Icon, RarityId, CostGold, CostMana
     -- Epic (25 000 g)
     (23, 'knight_commander', 'Knight Commander', '🛡️', 4, 25000, NULL, NULL, 'All troops +15% attack & defense'),
     (24, 'archmagus',        'Archmagus',        '🧙', 4, 25000, NULL, NULL, 'All research costs (gold & mana) -30%'),
+    (26, 'grand_marshal',    'Grand Marshal',    '🎖️', 4, 25000, NULL, NULL, '+1 simultaneous attack'),
 
     -- Legendary (50 000 g + 1 000 m, requires Tavern 8 + archmage research)
     (25, 'dragon_rider', 'Dragon Rider', '🐉', 5, 50000, 1000, 8, 'Conquest 0% losses, +25 bonus acres, all troops +10% atk/def');

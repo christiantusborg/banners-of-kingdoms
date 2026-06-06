@@ -1,6 +1,21 @@
 import { reactive } from 'vue';
 
 export type Race = 'Human' | 'Elven' | 'Dwarf' | 'Orc' | 'Vampire';
+
+// Timed attack missions. Siege = old Conquest, Raid = old Gather,
+// Slaver = old Kidnap/Plunder. Same gains as the instant actions had —
+// the cost is the real-time wait and the troops being away.
+export type AttackType = 'siege' | 'raid' | 'slaver';
+
+export interface AttackMission {
+  id: string;
+  type: AttackType;
+  tier1: number;
+  tier2: number;
+  tier3: number;
+  startedAt: number;
+  endsAt: number;
+}
 export type Resource = 'Food' | 'Gold' | 'Mana' | 'Wood' | 'Iron';
 export type WorkerType = 'basic' | 'panda';
 
@@ -28,6 +43,9 @@ export interface GameState {
     tier2: number;
     tier3: number;
   };
+  // Attacks underway: troops are out of `military` until the mission
+  // resolves (endsAt, real-world ms epoch). Survives logout via save/load.
+  attacks: AttackMission[];
   buildings: Record<Resource | 'Barracks' | 'Housing' | 'Tavern', number>;
   resources: Record<Resource, number>;
   workers: Record<Resource, WorkerState>;
@@ -57,7 +75,7 @@ export interface Hero {
   prereqs?: { tavernLevel?: number; research?: string[] };
 }
 
-export type ResearchBranch = 'military' | 'economy' | 'civic' | 'construction' | 'espionage' | 'magic';
+export type ResearchBranch = 'military' | 'economy' | 'civic' | 'construction' | 'espionage' | 'magic' | 'warfare';
 
 export interface Research {
   id: string;
@@ -89,6 +107,7 @@ const initialState: GameState = {
     tier2: 0,
     tier3: 0,
   },
+  attacks: [],
   buildings: {
     Food: 1,
     Gold: 1,
@@ -272,6 +291,13 @@ export const RESEARCH: Record<string, Research> = {
   charm:            { id: 'charm',            name: 'Charm',            branch: 'magic', tier: 4, slot: 3, cost: { Mana:  800 }, prereqs: ['minds_eye'], description: 'Spies count as peasants for population attack/defense bonus' },
   elemental_pact:   { id: 'elemental_pact',   name: 'Elemental Pact',   branch: 'magic', tier: 4, slot: 4, cost: { Mana: 1000 }, prereqs: ['conjure_familiar', 'scrying'], description: 'All resource production +50% (multiplicative)' },
   archmage:         { id: 'archmage',         name: 'Archmage',         branch: 'magic', tier: 5, slot: 3, cost: { Mana: 2500 }, prereqs: ['inferno', 'sanctuary', 'charm', 'elemental_pact'], description: 'Capstone: +25% troop stats, +100 max AP' },
+
+  // ── Warfare ───────────────────────────────────────────────────────────
+  pillaging:    { id: 'pillaging',    name: 'Pillaging',    branch: 'warfare', tier: 1, slot: 1, cost: { Gold: 1000 }, prereqs: [], description: 'Raid yields +25% resources' },
+  siegecraft:   { id: 'siegecraft',   name: 'Siegecraft',   branch: 'warfare', tier: 1, slot: 2, cost: { Gold: 1000 }, prereqs: [], description: 'Siege gains +25% acres' },
+  manhunters:   { id: 'manhunters',   name: 'Manhunters',   branch: 'warfare', tier: 1, slot: 3, cost: { Gold: 1000 }, prereqs: [], description: 'Slaver captures 100 population instead of 75' },
+  forced_march: { id: 'forced_march', name: 'Forced March', branch: 'warfare', tier: 2, slot: 1, cost: { Gold: 3000 }, prereqs: ['pillaging'], description: 'Attacks resolve in 4 hours instead of 5' },
+  war_council:  { id: 'war_council',  name: 'War Council',  branch: 'warfare', tier: 2, slot: 2, cost: { Gold: 3000 }, prereqs: ['siegecraft'], description: '+1 simultaneous attack (4 total)' },
 };
 
 export const HEROES: Record<string, Hero> = {
@@ -305,6 +331,7 @@ export const HEROES: Record<string, Hero> = {
 
   // ── Epic — 25 000 g ─────────────────────────────────────────────────
   knight_commander: { id: 'knight_commander', name: 'Knight Commander', icon: '🛡️', rarity: 'epic', cost: { Gold: 25000 }, description: 'All troops +15% attack & defense' },
+  grand_marshal:    { id: 'grand_marshal',    name: 'Grand Marshal',    icon: '🎖️', rarity: 'epic', cost: { Gold: 25000 }, description: '+1 simultaneous attack' },
   archmagus:        { id: 'archmagus',        name: 'Archmagus',        icon: '🧙', rarity: 'epic', cost: { Gold: 25000 }, description: 'All research costs (gold & mana) −30%' },
 
   // ── Legendary — 50 000 g + 1 000 m ──────────────────────────────────
@@ -579,46 +606,154 @@ export const promoteTroop = (fromTier: 1 | 2) => {
   }
 };
 
-const consumeTroops = (n: number) => {
+const totalTroops = () => store.military.tier1 + store.military.tier2 + store.military.tier3;
+
+// ── Timed attacks ───────────────────────────────────────────────────────
+// Siege/Raid/Slaver replace the instant Conquest/Gather/Kidnap. Launch costs
+// (AP, blood, troops leaving) are paid up front; the SAME gain formulas the
+// instant actions used apply when the mission resolves hours later. Modifier
+// research/heroes are evaluated at resolution time, not launch time.
+export const ATTACK_BASE_SLOTS = 3;
+
+export const attackSlots = () =>
+  ATTACK_BASE_SLOTS + (hasResearch('war_council') ? 1 : 0) + (hasHero('grand_marshal') ? 1 : 0);
+
+export const attackDurationMs = () =>
+  (hasResearch('forced_march') ? 4 : 5) * 60 * 60 * 1000;
+
+// Not crypto.randomUUID(): that needs a secure context and the game is
+// served over plain http on the LAN.
+const missionId = () =>
+  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+const dispatchMission = (type: AttackType, sent: { tier1: number; tier2: number; tier3: number }) => {
+  const now = Date.now();
+  store.attacks.push({
+    id: missionId(),
+    type,
+    tier1: sent.tier1,
+    tier2: sent.tier2,
+    tier3: sent.tier3,
+    startedAt: now,
+    endsAt: now + attackDurationMs(),
+  });
+  store.player.actionPoints--;
+  markAction();
+};
+
+// Removes troops lowest-tier-first and reports which tiers they came from
+// so the mission can march the survivors home tier-by-tier.
+const takeTroops = (n: number) => {
+  const sent = { tier1: 0, tier2: 0, tier3: 0 };
   let remaining = n;
   for (const tier of ['tier1', 'tier2', 'tier3'] as const) {
     const taken = Math.min(remaining, store.military[tier]);
     store.military[tier] -= taken;
+    sent[tier] = taken;
     remaining -= taken;
-    if (remaining === 0) return;
+    if (remaining === 0) break;
   }
+  return sent;
 };
 
-const totalTroops = () => store.military.tier1 + store.military.tier2 + store.military.tier3;
-
-export const conquest = () => {
+export const launchSiege = () => {
   if (store.player.actionPoints < 1) return;
+  if (store.attacks.length >= attackSlots()) return;
   const troops = totalTroops();
   if (troops < 3) return;
   if (!hasEnoughBlood(troops)) return;
   if (store.player.race === 'Vampire') store.blood -= bloodCostFor(troops);
+  dispatchMission('siege', takeTroops(troops));
+};
 
-  let lossPct = 0.1;
-  if (hasResearch('inferno') || hasHero('dragon_rider')) lossPct = 0;
-  else if (hasResearch('spark')) lossPct = 0.05;
-  if (hasHero('cunning_tactician')) lossPct *= 0.5;
-  const losses = Math.ceil(troops * lossPct);
+export const launchRaid = () => {
+  if (store.player.actionPoints < 1) return;
+  if (store.attacks.length >= attackSlots()) return;
+  const troops = totalTroops();
+  if (troops < 1) return;
+  if (!hasEnoughBlood(troops)) return;
+  if (store.player.race === 'Vampire') store.blood -= bloodCostFor(troops);
+  dispatchMission('raid', takeTroops(troops));
+};
 
-  let gain = Math.floor(troops / 3);
-  if (hasResearch('fireball')) gain += 5;
-  if (hasHero('dragon_rider')) gain += 25;
-  if (hasResearch('war_banners')) gain = Math.floor(gain * 1.5);
-  if (hasHero('war_general')) gain = Math.floor(gain * 1.5);
+export const launchSlaver = () => {
+  if (store.player.actionPoints < 1) return;
+  if (store.attacks.length >= attackSlots()) return;
+  const cost = hasResearch('sabotage') ? 1 : 2;
+  if (totalTroops() < cost) return;
+  if (!hasEnoughBlood(cost)) return;
+  if (store.player.race === 'Vampire') store.blood -= bloodCostFor(cost);
+  // The raiding party doesn't come back — same as the old instant Kidnap.
+  dispatchMission('slaver', takeTroops(cost));
+};
 
-  consumeTroops(losses);
-  let revivePct = 0;
-  if (hasResearch('mending')) revivePct += 0.5;
-  if (hasHero('battlefield_surgeon')) revivePct += 0.25;
-  if (revivePct > 0 && losses > 0) {
-    store.military.tier1 += Math.floor(losses * revivePct);
+const resolveAttack = (a: AttackMission) => {
+  const troops = a.tier1 + a.tier2 + a.tier3;
+  if (a.type === 'siege') {
+    let lossPct = 0.1;
+    if (hasResearch('inferno') || hasHero('dragon_rider')) lossPct = 0;
+    else if (hasResearch('spark')) lossPct = 0.05;
+    if (hasHero('cunning_tactician')) lossPct *= 0.5;
+    const losses = Math.ceil(troops * lossPct);
+
+    let gain = Math.floor(troops / 3);
+    if (hasResearch('fireball')) gain += 5;
+    if (hasHero('dragon_rider')) gain += 25;
+    if (hasResearch('war_banners')) gain = Math.floor(gain * 1.5);
+    if (hasHero('war_general')) gain = Math.floor(gain * 1.5);
+    if (hasResearch('siegecraft')) gain = Math.floor(gain * 1.25);
+
+    // Losses hit the lowest tier first, then the survivors march home.
+    const survivors = { tier1: a.tier1, tier2: a.tier2, tier3: a.tier3 };
+    let remaining = losses;
+    for (const tier of ['tier1', 'tier2', 'tier3'] as const) {
+      const killed = Math.min(remaining, survivors[tier]);
+      survivors[tier] -= killed;
+      remaining -= killed;
+    }
+    let revivePct = 0;
+    if (hasResearch('mending')) revivePct += 0.5;
+    if (hasHero('battlefield_surgeon')) revivePct += 0.25;
+    if (revivePct > 0 && losses > 0) survivors.tier1 += Math.floor(losses * revivePct);
+
+    store.military.tier1 += survivors.tier1;
+    store.military.tier2 += survivors.tier2;
+    store.military.tier3 += survivors.tier3;
+    store.province.acres += gain;
+  } else if (a.type === 'raid') {
+    const rolls = hasResearch('pillaging') ? Math.floor(troops * 1.25) : troops;
+    const weights: [Resource, number][] = [
+      ['Iron', 3], ['Wood', 3], ['Food', 1], ['Gold', 1], ['Mana', 1],
+    ];
+    const total = weights.reduce((s, [, w]) => s + w, 0);
+    for (let i = 0; i < rolls; i++) {
+      let roll = Math.random() * total;
+      for (const [res, w] of weights) {
+        roll -= w;
+        if (roll <= 0) { store.resources[res] += 1; break; }
+      }
+    }
+    // Raiding has no losses — everyone comes home.
+    store.military.tier1 += a.tier1;
+    store.military.tier2 += a.tier2;
+    store.military.tier3 += a.tier3;
+  } else {
+    // Slaver: the party was consumed at launch; only the captives arrive.
+    const captured = hasResearch('manhunters') ? 100 : 75;
+    const maxPop = store.buildings.Housing * popPerHousing();
+    store.province.population = Math.min(maxPop, store.province.population + captured);
+    if (store.player.race === 'Vampire') store.resources.Food += captured;
   }
-  store.province.acres += gain;
-  store.player.actionPoints--;
+};
+
+export const resolveDueAttacks = () => {
+  if (store.attacks.length === 0) return;
+  const now = Date.now();
+  const due = store.attacks.filter(a => a.endsAt <= now);
+  if (due.length === 0) return;
+  store.attacks = store.attacks.filter(a => a.endsAt > now);
+  for (const a of due) resolveAttack(a);
+  markAction();
 };
 
 export const explore = () => {
@@ -632,20 +767,6 @@ export const explore = () => {
   store.player.actionPoints--;
 };
 
-export const kidnap = () => {
-  if (store.player.actionPoints < 1) return;
-  const cost = hasResearch('sabotage') ? 1 : 2;
-  if (totalTroops() < cost) return;
-  if (!hasEnoughBlood(cost)) return;
-  consumeTroops(cost);
-  if (store.player.race === 'Vampire') store.blood -= bloodCostFor(cost);
-  const maxPop = store.buildings.Housing * popPerHousing();
-  store.province.population = Math.min(maxPop, store.province.population + 75);
-  // Vampires plunder the village for blood/food while they're at it.
-  if (store.player.race === 'Vampire') store.resources.Food += 75;
-  store.player.actionPoints--;
-};
-
 export const tradeResources = (from: Resource, to: Resource, amount: number) => {
   if (from === to) return;
   const ratio = getTradeRatio();
@@ -654,27 +775,6 @@ export const tradeResources = (from: Resource, to: Resource, amount: number) => 
   if (store.resources[from] < spend) return;
   store.resources[from] -= spend;
   store.resources[to] += spend / ratio;
-  markAction();
-};
-
-export const gatherResources = () => {
-  if (store.player.actionPoints < 1) return;
-  const troops = totalTroops();
-  if (troops < 1) return;
-  if (!hasEnoughBlood(troops)) return;
-  if (store.player.race === 'Vampire') store.blood -= bloodCostFor(troops);
-  const weights: [Resource, number][] = [
-    ['Iron', 3], ['Wood', 3], ['Food', 1], ['Gold', 1], ['Mana', 1],
-  ];
-  const total = weights.reduce((s, [, w]) => s + w, 0);
-  for (let i = 0; i < troops; i++) {
-    let roll = Math.random() * total;
-    for (const [res, w] of weights) {
-      roll -= w;
-      if (roll <= 0) { store.resources[res] += 1; break; }
-    }
-  }
-  store.player.actionPoints--;
   markAction();
 };
 
@@ -694,6 +794,7 @@ export const startGame = (extraResources: Resource[]) => {
   store.buildings.Housing = 10;
   store.buildings.Tavern = 1;
   store.heroes = [];
+  store.attacks = [];
   store.player.spies = 0;
   store.blooddolls = 0;
   store.blood = 0;
@@ -800,6 +901,9 @@ export const collectResources = () => {
       store.apAccumulator = 0;
     }
     store.player.maxActionPoints = getMaxAP();
+
+    // 2b. Attack missions whose real-world timer ran out come home now.
+    resolveDueAttacks();
 
     // 3. Population Growth — Vampires never grow naturally; kidnap is the only path.
     if (store.player.race !== 'Vampire') {
