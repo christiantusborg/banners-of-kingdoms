@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { store, serverClock } from './store/gameStore';
 import { authState, isAuthenticated, logout } from './services/auth';
 import { applyLoadedState, loadGame, saveGame, syncServerTime } from './services/api';
+import AdminPanel from './components/AdminPanel.vue';
 import LoginScreen from './components/LoginScreen.vue';
 import RaceSelector from './components/RaceSelector.vue';
 import ResourceSelector from './components/ResourceSelector.vue';
@@ -232,6 +233,7 @@ onBeforeUnmount(() => {
             >
               Sign out
             </button>
+            <AdminPanel />
           </div>
         </header>
 
