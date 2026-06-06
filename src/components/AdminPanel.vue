@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue';
-import { store } from '../store/gameStore';
+import { store, vampirePrisoners } from '../store/gameStore';
 import type { Resource } from '../store/gameStore';
 
 // Frontend-only gate: hides the panel from casual players. This is NOT
@@ -14,6 +14,7 @@ const password = ref('');
 const badPassword = ref(false);
 const amounts = reactive<Record<Resource, number>>({} as Record<Resource, number>);
 const blood = ref(0);
+const prisoners = ref(0);
 const actionPoints = ref(0);
 const MAX_AP = 999;
 
@@ -24,6 +25,7 @@ const prefill = () => {
     amounts[res] = Math.floor(store.resources[res]);
   }
   blood.value = Math.floor(store.blood);
+  prisoners.value = vampirePrisoners();
   actionPoints.value = Math.floor(store.player.actionPoints);
 };
 
@@ -57,6 +59,14 @@ const apply = () => {
     const bloodValue = Number(blood.value);
     if (Number.isFinite(bloodValue) && bloodValue >= 0) {
       store.blood = bloodValue;
+    }
+    const prisonerValue = Number(prisoners.value);
+    if (Number.isFinite(prisonerValue) && prisonerValue >= 0) {
+      // Prisoners are derived (population − ghouls − blooddolls − spies),
+      // so set them by rebuilding population from the other three parts.
+      const ghouls = Object.values(store.workers).reduce((acc, w) => acc + w.basic, 0);
+      store.province.population =
+        Math.floor(prisonerValue) + ghouls + store.blooddolls + store.player.spies;
     }
   }
   const ap = Number(actionPoints.value);
@@ -126,6 +136,16 @@ const apply = () => {
           <input
             id="admin-res-Blood"
             v-model.number="blood"
+            type="number"
+            min="0"
+            class="w-full rounded bg-slate-800 border border-slate-700 px-2 py-1 text-sm text-slate-100 text-right focus:outline-none focus:border-red-500"
+          />
+        </div>
+        <div v-if="isVampire" class="flex items-center justify-between gap-2 mb-2">
+          <label for="admin-prisoners" class="text-xs text-red-300 w-12" title="Sets population to prisoners + ghouls + blood dolls + spies">Prison.</label>
+          <input
+            id="admin-prisoners"
+            v-model.number="prisoners"
             type="number"
             min="0"
             class="w-full rounded bg-slate-800 border border-slate-700 px-2 py-1 text-sm text-slate-100 text-right focus:outline-none focus:border-red-500"
