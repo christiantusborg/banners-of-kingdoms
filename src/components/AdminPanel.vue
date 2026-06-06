@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue';
+import { computed, reactive, ref } from 'vue';
 import { store } from '../store/gameStore';
 import type { Resource } from '../store/gameStore';
 
@@ -13,11 +13,18 @@ const unlocked = ref(false);
 const password = ref('');
 const badPassword = ref(false);
 const amounts = reactive<Record<Resource, number>>({} as Record<Resource, number>);
+const blood = ref(0);
+const actionPoints = ref(0);
+const MAX_AP = 999;
+
+const isVampire = computed(() => store.player.race === 'Vampire');
 
 const prefill = () => {
   for (const res of Object.keys(store.resources) as Resource[]) {
     amounts[res] = Math.floor(store.resources[res]);
   }
+  blood.value = Math.floor(store.blood);
+  actionPoints.value = Math.floor(store.player.actionPoints);
 };
 
 const toggle = () => {
@@ -45,6 +52,18 @@ const apply = () => {
     if (Number.isFinite(value) && value >= 0) {
       store.resources[res] = value;
     }
+  }
+  if (isVampire.value) {
+    const bloodValue = Number(blood.value);
+    if (Number.isFinite(bloodValue) && bloodValue >= 0) {
+      store.blood = bloodValue;
+    }
+  }
+  const ap = Number(actionPoints.value);
+  if (Number.isFinite(ap) && ap >= 0) {
+    // AP regen only counts UP toward maxActionPoints, never clamps down,
+    // so values above the natural max (e.g. 999) stick until spent.
+    store.player.actionPoints = Math.min(ap, MAX_AP);
   }
   // Resources aren't watched by autosave (they change every tick) — bump
   // actionVersion so the new amounts persist.
@@ -99,6 +118,27 @@ const apply = () => {
             v-model.number="amounts[res as Resource]"
             type="number"
             min="0"
+            class="w-full rounded bg-slate-800 border border-slate-700 px-2 py-1 text-sm text-slate-100 text-right focus:outline-none focus:border-amber-500"
+          />
+        </div>
+        <div v-if="isVampire" class="flex items-center justify-between gap-2 mb-2">
+          <label for="admin-res-Blood" class="text-xs text-red-300 w-12">Blood</label>
+          <input
+            id="admin-res-Blood"
+            v-model.number="blood"
+            type="number"
+            min="0"
+            class="w-full rounded bg-slate-800 border border-slate-700 px-2 py-1 text-sm text-slate-100 text-right focus:outline-none focus:border-red-500"
+          />
+        </div>
+        <div class="flex items-center justify-between gap-2 mb-2 pt-2 border-t border-slate-800">
+          <label for="admin-ap" class="text-xs text-amber-300 w-12" title="Action points (max 999)">AP</label>
+          <input
+            id="admin-ap"
+            v-model.number="actionPoints"
+            type="number"
+            min="0"
+            :max="MAX_AP"
             class="w-full rounded bg-slate-800 border border-slate-700 px-2 py-1 text-sm text-slate-100 text-right focus:outline-none focus:border-amber-500"
           />
         </div>
