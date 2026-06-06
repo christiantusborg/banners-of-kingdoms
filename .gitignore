@@ -25,3 +25,12 @@ dist-ssr
 
 # TypeScript
 *.tsbuildinfo
+
+# .NET build artifacts
+**/bin/
+**/obj/
+
+# Local SQLite (game state) — created at runtime, never commit
+Game.WebApi/game.db
+Game.WebApi/game.db-shm
+Game.WebApi/game.db-wal

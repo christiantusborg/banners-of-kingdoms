@@ -1,0 +1,9 @@
+bin
+obj
+game.db
+game.db-shm
+game.db-wal
+.vs
+*.user
+Dockerfile
+.dockerignore

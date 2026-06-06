@@ -1,0 +1,43 @@
+# Production stack for 192.168.1.77.
+# Frontend (nginx) is the only thing exposed to the host (port 6060 → 80).
+# The .NET API is reachable only through the internal docker network at
+# http://api:5118 — nginx reverse-proxies /api/ to it (see nginx.conf).
+# SQLite lives in the `game-data` named volume so the DB survives rebuilds.
+
+services:
+  api:
+    image: fate-of-kingdoms-api:latest
+    container_name: fate-of-kingdoms-api
+    restart: unless-stopped
+    environment:
+      # JWT signing key MUST be at least 32 chars and SHOULD be replaced for
+      # production. Override via the deploy host env or this file.
+      Jwt__SigningKey: "CHANGE_ME_TO_A_LONG_RANDOM_SECRET_AT_LEAST_32_CHARS_LONG_PLEASE_REPLACE"
+      Jwt__Issuer: "Game.WebApi"
+      Jwt__Audience: "Game.WebApi.Clients"
+      ASPNETCORE_ENVIRONMENT: "Production"
+      # Day/Night follows the SERVER clock, so set the TZ to match where you
+      # want sunrise/sunset to land. Defaults to Copenhagen.
+      TZ: "Europe/Copenhagen"
+    volumes:
+      - game-data:/data
+    networks:
+      - fok
+
+  web:
+    image: fate-of-kingdoms:latest
+    container_name: fate-of-kingdoms
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "6060:80"
+    networks:
+      - fok
+
+networks:
+  fok:
+    driver: bridge
+
+volumes:
+  game-data:

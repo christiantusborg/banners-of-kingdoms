@@ -1,6 +1,6 @@
 import { reactive } from 'vue';
 
-export type Race = 'Human' | 'Elven' | 'Dwarf' | 'Orc';
+export type Race = 'Human' | 'Elven' | 'Dwarf' | 'Orc' | 'Vampire';
 export type Resource = 'Food' | 'Gold' | 'Mana' | 'Wood' | 'Iron';
 export type WorkerType = 'basic' | 'panda';
 
@@ -36,6 +36,13 @@ export interface GameState {
   apAccumulator: number;
   research: string[];
   heroes: string[];
+  // Vampire-only sub-pops + resource. Always present in the state so save/load
+  // round-trips cleanly regardless of race; for non-vampires they stay at 0.
+  blooddolls: number;
+  blood: number;
+  // Bumped by user actions that don't otherwise change save-tracked state
+  // (trade, gather, manual collect). Watched by autosave in App.vue.
+  actionVersion: number;
 }
 
 export type HeroRarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary';
@@ -111,7 +118,12 @@ const initialState: GameState = {
   apAccumulator: 0,
   research: [],
   heroes: [],
+  blooddolls: 0,
+  blood: 0,
+  actionVersion: 0,
 };
+
+const markAction = () => { store.actionVersion++; };
 
 export const store = reactive<GameState>(initialState);
 
@@ -119,8 +131,49 @@ export const TROOP_CONFIG = {
   Human: { tier1: { attack: 3, defense: 3 }, tier2: { attack: 6, defense: 6 }, tier3: { attack: 9, defense: 9 } },
   Elven: { tier1: { attack: 2, defense: 4 }, tier2: { attack: 4, defense: 7 }, tier3: { attack: 6, defense: 10 } },
   Dwarf: { tier1: { attack: 4, defense: 2 }, tier2: { attack: 7, defense: 4 }, tier3: { attack: 10, defense: 6 } },
-  Orc: { tier1: { attack: 4, defense: 4 }, tier2: { attack: 8, defense: 8 }, tier3: { attack: 12, defense: 12 } }
+  Orc:   { tier1: { attack: 4, defense: 4 }, tier2: { attack: 8, defense: 8 }, tier3: { attack: 12, defense: 12 } },
+  // Vampire troops mirror Orc as a baseline; the day/night modifier in
+  // troopAttack/DefenseBonus zeroes them out during the day and gives +1 at night.
+  Vampire: { tier1: { attack: 4, defense: 4 }, tier2: { attack: 8, defense: 8 }, tier3: { attack: 12, defense: 12 } },
 };
+
+// Day = 07:00–18:59. Night = 19:00–06:59. The SERVER clock is authoritative
+// (see GET /api/time) so every player sees the same day/night state regardless
+// of their timezone. We trust the server's `isNight` flag directly and poll
+// every minute to stay close to the transition moments.
+export const serverClock = reactive<{
+  isNight: boolean;
+  serverHour: number;
+  syncedAt: number;        // browser Date.now() of the last successful sync
+  haveSync: boolean;       // false until first successful /api/time call
+}>({ isNight: false, serverHour: 0, syncedAt: 0, haveSync: false });
+
+export const isNight = (): boolean => serverClock.isNight;
+
+// Per-race peasant militia contribution to the army totals (per population point).
+// Vampires: peasants don't attack but defend hard; they can defend day or night.
+export const PEASANT_COMBAT: Record<Race, { attack: number; defense: number }> = {
+  Human:   { attack: 1, defense: 1 },
+  Elven:   { attack: 1, defense: 1 },
+  Dwarf:   { attack: 1, defense: 1 },
+  Orc:     { attack: 1, defense: 1 },
+  Vampire: { attack: 0, defense: 2 },
+};
+
+// True when this race's troops cannot fight (currently: Vampires in daytime).
+export const troopsCombatActive = (): boolean => {
+  if (store.player.race === 'Vampire' && !isNight()) return false;
+  return true;
+};
+
+// True when this race's basic workers cannot produce (Vampires in daytime).
+export const workersActive = (): boolean => {
+  if (store.player.race === 'Vampire' && !isNight()) return false;
+  return true;
+};
+
+// True if the panda worker type is available to this race.
+export const pandaAvailable = (): boolean => store.player.race !== 'Vampire';
 
 export const TRAINING_COSTS = {
   tier1: { Gold: 100, Food: 50, Iron: 20 },
@@ -326,6 +379,9 @@ export const popPerHousing = () => {
   if (hasResearch('architecture')) n += 5;
   if (hasResearch('sanitation')) n += 10;
   if (hasHero('court_architect')) n += 10;
+  // Vampire crypts are stacked deep — each Housing holds twice the souls a
+  // mortal village can. Research/hero bonuses are doubled with the rest.
+  if (store.player.race === 'Vampire') n *= 2;
   return n;
 };
 
@@ -364,6 +420,7 @@ export const troopAttackBonus = (tier: 1 | 2 | 3) => {
     if (hasResearch('master_smithing')) b += 3;
   }
   if (hasHero('royal_weaponsmith')) b += 1;
+  if (store.player.race === 'Vampire' && isNight()) b += 1;
   return b;
 };
 
@@ -380,6 +437,7 @@ export const troopDefenseBonus = (tier: 1 | 2 | 3) => {
     if (hasResearch('tempered_steel')) b += 3;
   }
   if (hasHero('master_armorer')) b += 1;
+  if (store.player.race === 'Vampire' && isNight()) b += 1;
   return b;
 };
 
@@ -397,6 +455,8 @@ export const trainingCost = (kind: 'tier1' | 'promote') => {
   let food = base.Food;
   let iron = base.Iron;
   if (hasHero('drill_sergeant')) { food *= 0.5; iron *= 0.5; }
+  // Vampires don't use food, so it's free for them. Pop cost (1 per troop) applies in trainTroop.
+  if (store.player.race === 'Vampire') food = 0;
   return { Gold: base.Gold, Food: Math.floor(food), Iron: Math.floor(iron) };
 };
 
@@ -430,10 +490,13 @@ export const researchUnlock = (id: string) => {
 };
 
 export const RACE_CONFIG = {
-  Human: { fixed: ['Wood', 'Food'] as Resource[], pickCount: 2, availableExtra: ['Gold', 'Mana', 'Iron'] as Resource[] },
-  Elven: { fixed: ['Food', 'Mana'] as Resource[], pickCount: 1, availableExtra: ['Wood', 'Gold', 'Iron'] as Resource[] },
-  Dwarf: { fixed: ['Food', 'Iron'] as Resource[], pickCount: 1, availableExtra: ['Wood', 'Gold', 'Mana'] as Resource[] },
-  Orc: { fixed: ['Food'] as Resource[], pickCount: 1, availableExtra: ['Wood', 'Gold', 'Mana', 'Iron'] as Resource[] },
+  Human:   { fixed: ['Wood', 'Food'] as Resource[], pickCount: 2, availableExtra: ['Gold', 'Mana', 'Iron'] as Resource[] },
+  Elven:   { fixed: ['Food', 'Mana'] as Resource[], pickCount: 1, availableExtra: ['Wood', 'Gold', 'Iron'] as Resource[] },
+  Dwarf:   { fixed: ['Food', 'Iron'] as Resource[], pickCount: 1, availableExtra: ['Wood', 'Gold', 'Mana'] as Resource[] },
+  Orc:     { fixed: ['Food'] as Resource[], pickCount: 1, availableExtra: ['Wood', 'Gold', 'Mana', 'Iron'] as Resource[] },
+  // Vampires shun Food entirely — they don't farm, eat, or trade it. They begin
+  // with every non-Food resource unlocked, so there's nothing to pick at creation.
+  Vampire: { fixed: ['Wood', 'Gold', 'Mana', 'Iron'] as Resource[], pickCount: 0, availableExtra: [] as Resource[] },
 };
 
 // Actions
@@ -451,9 +514,41 @@ export const constructBuilding = (type: Resource | 'Barracks' | 'Housing' | 'Tav
   }
 };
 
+// Vampire pop has four sub-categories that all live under `population`:
+//   Prisoners (free), Ghouls (per-resource workers), Blood Dolls, Spies.
+// `population` = prisoners + ghouls (across all resources) + blood dolls + spies.
+// Troops are NOT pop — training one removes 1 pop forever. Un-assigning a
+// ghoul/blooddoll/spy kills them (also -1 pop). Only Plunder refills pop.
+export const vampirePrisoners = (): number => {
+  if (store.player.race !== 'Vampire') return 0;
+  const ghouls = (Object.values(store.workers) as WorkerState[]).reduce((acc, w) => acc + w.basic, 0);
+  return Math.max(0, Math.floor(store.province.population) - ghouls - store.blooddolls - store.player.spies);
+};
+
+export const vampireCanSpendPop = (): boolean => {
+  if (store.player.race !== 'Vampire') return true;
+  return vampirePrisoners() >= 1;
+};
+
+// Vampire barracks holds 3× the troops a mortal barracks does.
+export const barracksCapacity = (): number =>
+  store.buildings.Barracks * (store.player.race === 'Vampire' ? 30 : 10);
+
+// Blood cost to send N troops on an attack action (Vampire only). 1 per troop.
+export const bloodCostFor = (troops: number): number =>
+  store.player.race === 'Vampire' ? troops : 0;
+
+export const hasEnoughBlood = (troops: number): boolean =>
+  store.player.race !== 'Vampire' || store.blood >= bloodCostFor(troops);
+
 export const trainTroop = () => {
   const totalTroops = store.military.tier1 + store.military.tier2 + store.military.tier3;
-  if (totalTroops >= store.buildings.Barracks * 10) return;
+  if (totalTroops >= barracksCapacity()) return;
+
+  // Vampires forge troops from their own — each new soldier consumes 1 prisoner
+  // (and that pop is gone forever; only Plunder can refill).
+  const isVampire = store.player.race === 'Vampire';
+  if (isVampire && !vampireCanSpendPop()) return;
 
   const cost = trainingCost('tier1');
   if (store.resources.Gold >= cost.Gold && store.resources.Food >= cost.Food && store.resources.Iron >= cost.Iron) {
@@ -461,6 +556,7 @@ export const trainTroop = () => {
     store.resources.Food -= cost.Food;
     store.resources.Iron -= cost.Iron;
     store.military.tier1++;
+    if (isVampire) store.province.population = Math.max(0, store.province.population - 1);
   }
 };
 
@@ -498,6 +594,8 @@ export const conquest = () => {
   if (store.player.actionPoints < 1) return;
   const troops = totalTroops();
   if (troops < 3) return;
+  if (!hasEnoughBlood(troops)) return;
+  if (store.player.race === 'Vampire') store.blood -= bloodCostFor(troops);
 
   let lossPct = 0.1;
   if (hasResearch('inferno') || hasHero('dragon_rider')) lossPct = 0;
@@ -526,6 +624,7 @@ export const explore = () => {
   if (store.player.actionPoints < 1) return;
   const troops = totalTroops();
   if (troops < 5) return;
+  // Scouting doesn't draw blood — it's reconnaissance, not combat.
   let acres = Math.floor(troops / 5);
   if (hasHero('veteran_scout')) acres = Math.floor(acres * 1.5);
   store.province.acres += acres;
@@ -536,9 +635,13 @@ export const kidnap = () => {
   if (store.player.actionPoints < 1) return;
   const cost = hasResearch('sabotage') ? 1 : 2;
   if (totalTroops() < cost) return;
+  if (!hasEnoughBlood(cost)) return;
   consumeTroops(cost);
+  if (store.player.race === 'Vampire') store.blood -= bloodCostFor(cost);
   const maxPop = store.buildings.Housing * popPerHousing();
   store.province.population = Math.min(maxPop, store.province.population + 75);
+  // Vampires plunder the village for blood/food while they're at it.
+  if (store.player.race === 'Vampire') store.resources.Food += 75;
   store.player.actionPoints--;
 };
 
@@ -550,12 +653,15 @@ export const tradeResources = (from: Resource, to: Resource, amount: number) => 
   if (store.resources[from] < spend) return;
   store.resources[from] -= spend;
   store.resources[to] += spend / ratio;
+  markAction();
 };
 
 export const gatherResources = () => {
   if (store.player.actionPoints < 1) return;
   const troops = totalTroops();
   if (troops < 1) return;
+  if (!hasEnoughBlood(troops)) return;
+  if (store.player.race === 'Vampire') store.blood -= bloodCostFor(troops);
   const weights: [Resource, number][] = [
     ['Iron', 3], ['Wood', 3], ['Food', 1], ['Gold', 1], ['Mana', 1],
   ];
@@ -568,6 +674,7 @@ export const gatherResources = () => {
     }
   }
   store.player.actionPoints--;
+  markAction();
 };
 
 export const startGame = (extraResources: Resource[]) => {
@@ -586,8 +693,25 @@ export const startGame = (extraResources: Resource[]) => {
   store.buildings.Housing = 10;
   store.buildings.Tavern = 1;
   store.heroes = [];
-  store.workers.Food.basic = 5;
   store.player.spies = 0;
+  store.blooddolls = 0;
+  store.blood = 0;
+
+  if (store.player.race === 'Vampire') {
+    // Starting kit: 10 Ghouls (distributed across non-Food resources),
+    // 10 Blood Dolls, 50 Prisoners. Internal pop = 70.
+    store.blooddolls = 10;
+    store.province.population = 70;
+    // Distribute 10 ghouls across Wood/Gold/Iron/Mana (3,3,2,2).
+    store.workers.Wood.basic = 3;
+    store.workers.Gold.basic = 3;
+    store.workers.Iron.basic = 2;
+    store.workers.Mana.basic = 2;
+  } else {
+    store.province.population = 100;
+    store.workers.Food.basic = 5;
+  }
+
   store.phase = 'GAMEPLAY';
   store.lastTick = Date.now();
 };
@@ -603,9 +727,11 @@ export const collectResources = () => {
 
   if (deltaTime >= 1) {
     // 1. Production
+    const vampireDayHalted = store.player.race === 'Vampire' && !isNight();
     (Object.keys(store.resources) as Resource[]).forEach(res => {
       const w = store.workers[res];
-      let base = w.basic;
+      // Vampire population only works at night — basic workers sit idle in daylight.
+      let base = vampireDayHalted ? 0 : w.basic;
       if (!store.player.unlockedResources.includes(res) && hasResearch('sanctuary')) {
         base = Math.max(base, 0.5);
       }
@@ -630,6 +756,8 @@ export const collectResources = () => {
       if (hasResearch('elemental_pact')) mult *= 1.5;
 
       let produced = base * mult;
+      // Vampire ghouls (= basic workers) labor at half the speed of mortal workers.
+      if (store.player.race === 'Vampire') produced *= 0.5;
       if (res === 'Mana' && hasResearch('mana_awakening')) produced += 5;
 
       store.resources[res] += produced;
@@ -637,6 +765,11 @@ export const collectResources = () => {
 
     // Village Elder: flat +5 gold per tick
     if (hasHero('village_elder')) store.resources.Gold += 5;
+
+    // Blood Dolls drip Blood at night — Vampire's combat fuel. 0.5 per doll/tick.
+    if (store.player.race === 'Vampire' && store.blooddolls > 0 && isNight()) {
+      store.blood += store.blooddolls * 0.5;
+    }
 
     // 1b. Spy income
     if (store.player.spies > 0) {
@@ -667,29 +800,38 @@ export const collectResources = () => {
     }
     store.player.maxActionPoints = getMaxAP();
 
-    // 3. Population Growth
-    const maxPop = store.buildings.Housing * popPerHousing();
-    if (store.province.population < maxPop) {
-      let rate = 0.01;
-      if (hasResearch('plumbing')) rate *= 2;
-      if (hasResearch('greater_heal')) rate *= 1.5;
-      if (hasHero('town_crier')) rate *= 1.5;
-      const growth = (maxPop - store.province.population) * rate;
-      store.province.population = Math.min(maxPop, store.province.population + Math.max(0.02, growth));
+    // 3. Population Growth — Vampires never grow naturally; kidnap is the only path.
+    if (store.player.race !== 'Vampire') {
+      const maxPop = store.buildings.Housing * popPerHousing();
+      if (store.province.population < maxPop) {
+        let rate = 0.01;
+        if (hasResearch('plumbing')) rate *= 2;
+        if (hasResearch('greater_heal')) rate *= 1.5;
+        if (hasHero('town_crier')) rate *= 1.5;
+        const growth = (maxPop - store.province.population) * rate;
+        store.province.population = Math.min(maxPop, store.province.population + Math.max(0.02, growth));
+      }
     }
 
-    // 4. Consumption & Maintenance
+    // 4. Consumption & Maintenance — Vampires neither eat nor starve.
     const troopsTotal = store.military.tier1 + store.military.tier2 + store.military.tier3;
-    let foodPerTroop = 0.2;
-    if (hasResearch('drill')) foodPerTroop *= 0.75;
-    const foodCons = (store.province.population * 0.1) + (troopsTotal * foodPerTroop);
-    store.resources.Food = Math.max(0, store.resources.Food - foodCons);
+    if (store.player.race !== 'Vampire') {
+      let foodPerTroop = 0.2;
+      if (hasResearch('drill')) foodPerTroop *= 0.75;
+      const foodCons = (store.province.population * 0.1) + (troopsTotal * foodPerTroop);
+      store.resources.Food = Math.max(0, store.resources.Food - foodCons);
+    }
 
-    let goldMaint = (store.military.tier1 * 1) + (store.military.tier2 * 3) + (store.military.tier3 * 7);
-    if (hasResearch('quartermaster')) goldMaint *= 0.75;
-    store.resources.Gold = Math.max(0, store.resources.Gold - goldMaint);
+    // Vampire troops are part of the clan — they don't draw a paycheck.
+    if (store.player.race !== 'Vampire') {
+      let goldMaint = (store.military.tier1 * 1) + (store.military.tier2 * 3) + (store.military.tier3 * 7);
+      if (hasResearch('quartermaster')) goldMaint *= 0.75;
+      store.resources.Gold = Math.max(0, store.resources.Gold - goldMaint);
+    }
 
-    if (store.resources.Food === 0) store.province.population = Math.max(10, store.province.population * 0.995);
+    if (store.player.race !== 'Vampire' && store.resources.Food === 0) {
+      store.province.population = Math.max(10, store.province.population * 0.995);
+    }
 
     store.lastTick = now;
   }
@@ -697,14 +839,28 @@ export const collectResources = () => {
 
 export const manualCollect = (res: Resource) => {
   const w = store.workers[res];
-  if (w.panda > 0) store.resources[res] += (w.panda * 5);
+  if (w.panda > 0) {
+    store.resources[res] += (w.panda * 5);
+    markAction();
+  }
 };
 
 export const addWorker = (res: Resource, type: WorkerType) => {
     if (store.player.actionPoints < 1) return;
     if (!store.player.unlockedResources.includes(res)) return;
+    if (type === 'panda' && !pandaAvailable()) return;
     const currentWorkers = store.workers[res].basic + store.workers[res].panda;
     if (currentWorkers >= store.buildings[res] * workerCapPerBuilding()) return;
+
+    // Vampires: a Ghoul takes one Prisoner slot. Pop count is unchanged on add;
+    // removal kills the ghoul (-1 pop) since conversions are one-way.
+    if (store.player.race === 'Vampire' && type === 'basic') {
+        if (!vampireCanSpendPop()) return;
+        store.workers[res].basic++;
+        store.player.actionPoints -= 1;
+        return;
+    }
+
     if (getTotalWorkers() < Math.floor(store.province.population)) {
         store.workers[res][type]++;
         store.player.actionPoints -= 1;
@@ -715,6 +871,10 @@ export const removeWorker = (res: Resource, type: WorkerType) => {
     if (store.player.actionPoints < 1) return;
     if (store.workers[res][type] > 0) {
         store.workers[res][type]--;
+        // Vampire ghoul removal is final — the pop is lost, not freed.
+        if (store.player.race === 'Vampire' && type === 'basic') {
+            store.province.population = Math.max(0, store.province.population - 1);
+        }
         store.player.actionPoints -= 1;
     }
 };
@@ -722,12 +882,32 @@ export const removeWorker = (res: Resource, type: WorkerType) => {
 export const adjustSpies = (amount: number) => {
     const apCost = hasResearch('scrying') ? 0 : 1;
     if (store.player.actionPoints < apCost) return;
-    if (amount > 0 && getTotalWorkers() < Math.floor(store.province.population)) {
+    const isVampire = store.player.race === 'Vampire';
+    if (amount > 0) {
+        const room = isVampire
+            ? vampirePrisoners() >= 1
+            : getTotalWorkers() < Math.floor(store.province.population);
+        if (!room) return;
         store.player.spies += amount;
         store.player.actionPoints -= apCost;
     } else if (amount < 0 && store.player.spies > 0) {
         store.player.spies += amount;
+        if (isVampire) store.province.population = Math.max(0, store.province.population - 1);
         store.player.actionPoints -= apCost;
+    }
+};
+
+export const adjustBlooddolls = (amount: number) => {
+    if (store.player.race !== 'Vampire') return;
+    if (store.player.actionPoints < 1) return;
+    if (amount > 0) {
+        if (vampirePrisoners() < 1) return;
+        store.blooddolls += 1;
+        store.player.actionPoints -= 1;
+    } else if (amount < 0 && store.blooddolls > 0) {
+        store.blooddolls -= 1;
+        store.province.population = Math.max(0, store.province.population - 1);
+        store.player.actionPoints -= 1;
     }
 };
 

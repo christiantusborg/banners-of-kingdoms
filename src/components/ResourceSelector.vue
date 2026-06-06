@@ -33,9 +33,14 @@ const resourceIcons: Record<Resource, string> = {
     <h1 class="text-4xl font-bold mb-4 text-amber-500">Starting Resources</h1>
     <p class="text-xl mb-8">As a {{ race }}, you start with <span class="text-amber-400 font-bold">{{ config.fixed.join(' & ') }}</span>.</p>
     
-    <p class="mb-4 text-slate-300">Select {{ config.pickCount }} more resource{{ config.pickCount > 1 ? 's' : '' }}:</p>
-    
-    <div class="flex gap-4 mb-8">
+    <p v-if="config.pickCount > 0" class="mb-4 text-slate-300">
+      Select {{ config.pickCount }} more resource{{ config.pickCount > 1 ? 's' : '' }}:
+    </p>
+    <p v-else class="mb-4 text-slate-300">
+      Nothing else to pick — your race begins with every resource it can use.
+    </p>
+
+    <div v-if="config.availableExtra.length > 0" class="flex gap-4 mb-8">
       <div
         v-for="res in config.availableExtra"
         :key="res"
