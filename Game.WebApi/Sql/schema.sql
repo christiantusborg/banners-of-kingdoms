@@ -165,6 +165,38 @@ CREATE TABLE IF NOT EXISTS PlayerHeroes (
     PRIMARY KEY (PlayerId, HeroId)
 );
 
+-- Wizard Tower state. One row per player (created lazily on first save).
+-- LastRaidJson is a display-only blob (RaidReportDto) — the server never
+-- reads it, so JSON keeps the schema simple.
+CREATE TABLE IF NOT EXISTS PlayerWizardry (
+    PlayerId     TEXT PRIMARY KEY REFERENCES Players(Id) ON DELETE CASCADE,
+    Wizards      INTEGER NOT NULL DEFAULT 0,
+    NextRaidAt   INTEGER NOT NULL DEFAULT 0,
+    LastRaidJson TEXT NULL
+);
+
+-- Built schools of magic and their level (1-5). School codes are
+-- client-defined strings ('defence', 'attack', ...) like spell ids below.
+CREATE TABLE IF NOT EXISTS PlayerSpellSchools (
+    PlayerId TEXT    NOT NULL REFERENCES Players(Id) ON DELETE CASCADE,
+    School   TEXT    NOT NULL,
+    Level    INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (PlayerId, School)
+);
+
+CREATE TABLE IF NOT EXISTS PlayerSpells (
+    PlayerId TEXT NOT NULL REFERENCES Players(Id) ON DELETE CASCADE,
+    SpellId  TEXT NOT NULL,
+    PRIMARY KEY (PlayerId, SpellId)
+);
+
+CREATE TABLE IF NOT EXISTS PlayerSpellBuffs (
+    PlayerId  TEXT    NOT NULL REFERENCES Players(Id) ON DELETE CASCADE,
+    SpellId   TEXT    NOT NULL,
+    ExpiresAt INTEGER NOT NULL,
+    PRIMARY KEY (PlayerId, SpellId)
+);
+
 -- Timed attack missions in flight. Id is the frontend-generated mission id;
 -- StartedAt/EndsAt are ms since epoch (JS Date.now()) — resolution happens
 -- client-side, the server only persists missions across sessions.
@@ -232,4 +264,5 @@ INSERT OR IGNORE INTO BuildingTypes (Id, Code, Name, LandCost) VALUES
     (5, 'Mana',     'Sanctum',  0),
     (6, 'Housing',  'Housing',  1),
     (7, 'Barracks', 'Barracks', 1),
-    (8, 'Tavern',   'Tavern',   2);
+    (8, 'Tavern',   'Tavern',   2),
+    (9, 'WizardTower', 'Wizard Tower', 2);

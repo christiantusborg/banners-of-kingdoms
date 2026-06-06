@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { store, Resource, manualCollect, addWorker, removeWorker, WorkerType, getTotalWorkers, adjustSpies, adjustBlooddolls, trainTroop, promoteTroop, TROOP_CONFIG, constructBuilding, explore, launchSiege, launchRaid, launchSlaver, attackSlots, attackDurationMs, landUsed, tradeResources, effectiveBuildingCost, effectiveBuildingLand, getTradeRatio, popPerHousing, workerCapPerBuilding, troopAttackBonus, troopDefenseBonus, troopMultiplier, hasResearch, getApRegenSeconds, RESEARCH, isResearchAvailable, researchUnlock, effectiveResearchCost, trainingCost, ResearchBranch, HEROES, HeroRarity, hasHero, hireHero, dismissHero, canHireHero, heroSlotsTotal, heroSlotsUsed, heroSlotsFree, TAVERN_NAMES, TAVERN_MAX_LEVEL, isNight, PEASANT_COMBAT, troopsCombatActive, pandaAvailable, vampireCanSpendPop, vampirePrisoners, barracksCapacity, bloodCostFor, hasEnoughBlood } from '../store/gameStore';
+import { store, Resource, manualCollect, addWorker, removeWorker, WorkerType, getTotalWorkers, adjustSpies, adjustBlooddolls, trainTroop, promoteTroop, TROOP_CONFIG, constructBuilding, explore, launchSiege, launchRaid, launchSlaver, attackSlots, attackDurationMs, landUsed, tradeResources, effectiveBuildingCost, effectiveBuildingLand, getTradeRatio, popPerHousing, workerCapPerBuilding, troopAttackBonus, troopDefenseBonus, troopMultiplier, hasResearch, getApRegenSeconds, RESEARCH, isResearchAvailable, researchUnlock, effectiveResearchCost, trainingCost, ResearchBranch, HEROES, HeroRarity, hasHero, hireHero, dismissHero, canHireHero, heroSlotsTotal, heroSlotsUsed, heroSlotsFree, TAVERN_NAMES, TAVERN_MAX_LEVEL, isNight, PEASANT_COMBAT, troopsCombatActive, pandaAvailable, vampireCanSpendPop, vampirePrisoners, barracksCapacity, bloodCostFor, hasEnoughBlood, WIZARD_TOWER_MAX_LEVEL, SCHOOL_MAX_LEVEL, WIZARDS_PER_TOWER_LEVEL, SPELLS, SPELL_RESEARCH_COST, SPELL_CAST_MANA, WIZARD_COST, wizardCap, schoolLevel, schoolUpgradeCost, upgradeSchool, trainWizard, hasSpell, canResearchSpell, researchSpell, isBuffActive, canCastSpell, castSpell, provinceDefense, RAID_WARNING_MS } from '../store/gameStore';
 import type { AttackMission } from '../store/gameStore';
 import { saveGame } from '../services/api';
 import { computed, ref, watch } from 'vue';
@@ -145,7 +145,39 @@ const visibleResources = computed<Resource[]>(() => {
   return showFood ? ALL_RESOURCES : ALL_RESOURCES.filter(r => r !== 'Food');
 });
 
-const activeTab = ref<'empire' | 'research' | 'tavern'>('empire');
+const activeTab = ref<'empire' | 'research' | 'tavern' | 'tower'>('empire');
+
+// ── Wizard Tower helpers ─────────────────────────────────────────────────
+const defenceSpells = computed(() =>
+  Object.values(SPELLS).filter(s => s.school === 'defence').sort((a, b) => a.tier - b.tier)
+);
+const towerLevel = computed(() => store.buildings.WizardTower);
+// store.lastTick keeps these counting down once a second.
+const buffRemaining = (spellId: string) => {
+  const buff = store.spells.buffs.find(b => b.spellId === spellId && b.expiresAt > store.lastTick);
+  if (!buff) return '';
+  const ms = buff.expiresAt - store.lastTick;
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  const s = Math.floor((ms % 60_000) / 1000);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+};
+// Only Watchful Wards reveals the raid timer, and only inside 30 minutes.
+const raidIncoming = computed(() =>
+  store.spells.buffs.some(b => b.expiresAt > store.lastTick && SPELLS[b.spellId]?.raidWarning) &&
+  store.spells.nextRaidAt > 0 &&
+  store.spells.nextRaidAt - store.lastTick <= RAID_WARNING_MS
+);
+const lastRaidText = computed(() => {
+  const r = store.spells.lastRaid;
+  if (!r) return '';
+  const when = new Date(r.at).toLocaleString();
+  if (r.repelled) return `${when} — warband repelled by Aegis Dome`;
+  if (r.won) return `${when} — raid defeated (${r.defense} def vs ${r.strength}), looted ${r.lootGold}g`;
+  return `${when} — raid LOST (${r.defense} def vs ${r.strength}): -10% resources, -5% population`;
+});
 
 const rarityMeta: Record<HeroRarity, { label: string; title: string; border: string; chip: string }> = {
   common:    { label: 'Common',    title: 'text-slate-300',  border: 'border-slate-600',     chip: 'bg-slate-600' },
@@ -414,6 +446,10 @@ const costLabel = (r: ResearchDef) => {
         @click="activeTab = 'tavern'"
         :class="['px-6 py-3 text-sm font-bold uppercase tracking-wide transition-all border-b-2', activeTab === 'tavern' ? 'text-amber-400 border-amber-500' : 'text-slate-500 border-transparent hover:text-slate-300']"
       >🍺 Tavern <span class="text-[10px] text-slate-400">({{ heroSlotsUsed() }}/{{ heroSlotsTotal() }})</span></button>
+      <button
+        @click="activeTab = 'tower'"
+        :class="['px-6 py-3 text-sm font-bold uppercase tracking-wide transition-all border-b-2', activeTab === 'tower' ? 'text-amber-400 border-amber-500' : 'text-slate-500 border-transparent hover:text-slate-300']"
+      >🧙 Tower <span v-if="towerLevel > 0" class="text-[10px] text-slate-400">(Lv {{ towerLevel }})</span><span v-if="raidIncoming" class="text-[10px] text-rose-400 animate-pulse ml-1">⚠</span></button>
     </nav>
 
     <main v-if="activeTab === 'empire'" class="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -941,6 +977,138 @@ const costLabel = (r: ResearchDef) => {
             </div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <section v-else-if="activeTab === 'tower'" class="space-y-8">
+      <!-- Raid warning banner (Watchful Wards only) -->
+      <div v-if="raidIncoming" class="bg-rose-900/40 border-2 border-rose-600 rounded-2xl p-4 text-rose-200 font-bold animate-pulse">
+        ⚠️ The wards tremble — a warband approaches! It strikes within 30 minutes. Bolster your defenses!
+      </div>
+
+      <!-- Tower header / build / upgrade -->
+      <div class="bg-slate-800 p-6 rounded-2xl border-2 border-indigo-900/50">
+        <div class="flex justify-between items-start gap-6">
+          <div>
+            <h2 class="text-3xl font-bold text-indigo-400 flex items-center gap-2">🧙 Wizard Tower</h2>
+            <p class="text-xs uppercase text-slate-500 mt-1">
+              Level {{ towerLevel }} / {{ WIZARD_TOWER_MAX_LEVEL }}
+              <span v-if="towerLevel > 0"> · Wizards {{ store.wizards }} / {{ wizardCap() }}</span>
+            </p>
+            <p v-if="towerLevel === 0" class="text-sm text-slate-400 mt-2 max-w-lg">
+              Raiders prowl these lands — every province is attacked sooner or later. The tower's
+              Defence school wards your people. Each tower level houses {{ WIZARDS_PER_TOWER_LEVEL }} wizards
+              and raises the school's maximum level.
+            </p>
+          </div>
+          <div v-if="towerLevel < WIZARD_TOWER_MAX_LEVEL" class="flex flex-col items-end gap-1">
+            <button
+              @click="constructBuilding('WizardTower')"
+              :disabled="store.player.actionPoints < 1 || store.resources.Gold < effectiveBuildingCost(store.buildings.WizardTower, 'WizardTower').Gold || store.resources.Wood < effectiveBuildingCost(store.buildings.WizardTower, 'WizardTower').Wood || landSummary.used + effectiveBuildingLand('WizardTower') > store.province.acres"
+              class="px-4 py-2 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-30 rounded-lg text-sm font-bold transition-all"
+            >
+              {{ towerLevel === 0 ? 'Build' : 'Upgrade' }} (1 AP)
+            </button>
+            <p class="text-[10px] text-slate-500">
+              {{ effectiveBuildingCost(store.buildings.WizardTower, 'WizardTower').Gold }}g,
+              {{ effectiveBuildingCost(store.buildings.WizardTower, 'WizardTower').Wood }}w ·
+              Land: +{{ effectiveBuildingLand('WizardTower') }}
+            </p>
+          </div>
+          <div v-else class="text-indigo-400 font-bold text-sm">⭐ Max level</div>
+        </div>
+
+        <!-- Wizards -->
+        <div v-if="towerLevel > 0" class="mt-5 bg-slate-900/50 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
+          <div>
+            <p class="font-bold text-slate-200">Wizards</p>
+            <p class="text-xs text-slate-500">Trained from population · casting a tier-N spell consumes N wizards</p>
+          </div>
+          <div class="flex items-center gap-3">
+            <span class="font-mono text-indigo-300">{{ store.wizards }} / {{ wizardCap() }}</span>
+            <button
+              @click="trainWizard"
+              :disabled="store.wizards >= wizardCap() || store.resources.Gold < WIZARD_COST.Gold || store.resources.Mana < WIZARD_COST.Mana || (isVampire && vampirePrisoners() < 1)"
+              class="px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-30 rounded-lg text-xs font-bold"
+            >
+              Train ({{ WIZARD_COST.Gold }}g + {{ WIZARD_COST.Mana }}m)
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Defence school -->
+      <div v-if="towerLevel > 0" class="bg-slate-800 p-6 rounded-2xl border-2 border-sky-900/50">
+        <div class="flex justify-between items-start mb-4">
+          <h3 class="text-2xl font-bold text-sky-400">🛡 Defence School <span class="text-sm text-slate-500 font-normal">Lv {{ schoolLevel('defence') }}</span></h3>
+          <div v-if="schoolLevel('defence') < SCHOOL_MAX_LEVEL" class="flex flex-col items-end gap-1">
+            <button
+              @click="upgradeSchool('defence')"
+              :disabled="schoolLevel('defence') >= towerLevel || store.resources.Gold < schoolUpgradeCost(schoolLevel('defence')).Gold || store.resources.Mana < schoolUpgradeCost(schoolLevel('defence')).Mana"
+              class="px-3 py-1.5 bg-sky-700 hover:bg-sky-600 disabled:opacity-30 rounded-lg text-xs font-bold"
+            >
+              Upgrade school
+            </button>
+            <p class="text-[10px] text-slate-500">
+              {{ schoolUpgradeCost(schoolLevel('defence')).Gold }}g + {{ schoolUpgradeCost(schoolLevel('defence')).Mana }}m
+              <span v-if="schoolLevel('defence') >= towerLevel" class="text-rose-400"> · needs tower Lv {{ schoolLevel('defence') + 1 }}</span>
+            </p>
+          </div>
+        </div>
+        <p class="text-[11px] text-slate-500 mb-3">Spell tier N requires school level N. Other schools of magic open as the tower grows (coming soon).</p>
+        <div class="flex flex-col gap-2">
+          <div
+            v-for="spell in defenceSpells"
+            :key="spell.id"
+            class="bg-slate-900/50 p-3 rounded-xl border border-slate-700 flex justify-between items-center gap-4"
+          >
+            <div>
+              <p class="font-bold text-slate-200 text-sm">
+                T{{ spell.tier }} · {{ spell.name }}
+                <span v-if="isBuffActive(spell.id)" class="text-emerald-400 text-xs ml-1">● active {{ buffRemaining(spell.id) }}</span>
+              </p>
+              <p class="text-[11px] text-slate-400">{{ spell.description }}</p>
+            </div>
+            <div class="text-right shrink-0">
+              <template v-if="!hasSpell(spell.id)">
+                <button
+                  v-if="schoolLevel('defence') >= spell.tier"
+                  @click="researchSpell(spell.id)"
+                  :disabled="!canResearchSpell(spell.id)"
+                  class="px-3 py-1.5 bg-amber-700 hover:bg-amber-600 disabled:opacity-30 rounded-lg text-xs font-bold"
+                >
+                  Research ({{ SPELL_RESEARCH_COST[spell.tier].Gold }}g + {{ SPELL_RESEARCH_COST[spell.tier].Mana }}m)
+                </button>
+                <span v-else class="text-[10px] text-slate-500 italic">School Lv {{ spell.tier }} required</span>
+              </template>
+              <template v-else>
+                <button
+                  @click="castSpell(spell.id)"
+                  :disabled="!canCastSpell(spell.id)"
+                  :title="isBuffActive(spell.id) ? 'Already active' : store.wizards < spell.tier ? `Needs ${spell.tier} wizards` : ''"
+                  class="px-3 py-1.5 bg-fuchsia-700 hover:bg-fuchsia-600 disabled:opacity-30 rounded-lg text-xs font-bold"
+                >
+                  Cast ({{ SPELL_CAST_MANA[spell.tier] }}m + {{ spell.tier }}🧙)
+                </button>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Raids -->
+      <div class="bg-slate-800 p-6 rounded-2xl border-2 border-rose-900/50">
+        <h3 class="text-2xl font-bold text-rose-400 mb-2">🛡️ Province Defense</h3>
+        <p class="text-sm text-slate-300">Current defense score: <span class="font-mono text-emerald-300">{{ provinceDefense() }}</span></p>
+        <p class="text-[11px] text-slate-500 mt-1">
+          Troops at home, peasants, and active Defence spells all count. Warbands strike every 4–12 hours;
+          a typical one fields ~{{ store.province.acres * 2 }} strength for your {{ store.province.acres }} acres.
+          Losing costs 10% of each resource and 5% of your population.
+        </p>
+        <p v-if="lastRaidText" class="text-xs mt-3" :class="store.spells.lastRaid?.won ? 'text-emerald-300' : 'text-rose-300'">
+          Last raid: {{ lastRaidText }}
+        </p>
+        <p v-else class="text-xs mt-3 text-slate-500">No raids yet — they will come.</p>
       </div>
     </section>
   </div>

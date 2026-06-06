@@ -16,6 +16,54 @@ export interface AttackMission {
   startedAt: number;
   endsAt: number;
 }
+
+export type BuildingType = Resource | 'Barracks' | 'Housing' | 'Tavern' | 'WizardTower';
+
+// ── Wizard Tower ─────────────────────────────────────────────────────────
+// The tower hosts schools of magic. Phase 1 ships the Defence school only;
+// Attack/Darkness/Light/Land/Weaken arrive in phase 2 (tower levels 2-5 each
+// add one school slot, so a maxed tower has Defence + 4 of the other 5).
+export type SpellSchool = 'defence' | 'attack' | 'darkness' | 'light' | 'land' | 'weaken';
+
+export interface SpellDef {
+  id: string;
+  name: string;
+  school: SpellSchool;
+  tier: 1 | 2 | 3 | 4 | 5;
+  description: string;
+  // Timed buffs last this many real-world hours; undefined = instant/charge.
+  durationHours?: number;
+  // Multiplier added to province defense while active (0.1 = +10%).
+  defenseBonus?: number;
+  // Aegis Dome: raids during the buff are repelled without a battle.
+  repelRaids?: boolean;
+  // Watchful Wards: incoming raids are announced 30 minutes ahead.
+  raidWarning?: boolean;
+}
+
+export interface ActiveBuff {
+  spellId: string;
+  expiresAt: number;
+}
+
+export interface RaidReport {
+  at: number;
+  strength: number;
+  defense: number;
+  won: boolean;
+  repelled: boolean;
+  lootGold: number;
+}
+
+export interface SpellState {
+  // Built schools and their level (1-5). Tower level 1 grants defence at 1.
+  schools: Partial<Record<SpellSchool, number>>;
+  researched: string[];
+  buffs: ActiveBuff[];
+  // Next NPC raid, ms epoch. 0 = not scheduled yet (set on first tick).
+  nextRaidAt: number;
+  lastRaid: RaidReport | null;
+}
 export type Resource = 'Food' | 'Gold' | 'Mana' | 'Wood' | 'Iron';
 export type WorkerType = 'basic' | 'panda';
 
@@ -46,7 +94,11 @@ export interface GameState {
   // Attacks underway: troops are out of `military` until the mission
   // resolves (endsAt, real-world ms epoch). Survives logout via save/load.
   attacks: AttackMission[];
-  buildings: Record<Resource | 'Barracks' | 'Housing' | 'Tavern', number>;
+  buildings: Record<BuildingType, number>;
+  // Wizards live in the tower; they're population (like spies) and are
+  // consumed by casting (tier N spell kills N wizards).
+  wizards: number;
+  spells: SpellState;
   resources: Record<Resource, number>;
   workers: Record<Resource, WorkerState>;
   phase: 'CREATION_RACE' | 'CREATION_RESOURCES' | 'GAMEPLAY';
@@ -117,6 +169,15 @@ const initialState: GameState = {
     Barracks: 1,
     Housing: 10,
     Tavern: 1,
+    WizardTower: 0,
+  },
+  wizards: 0,
+  spells: {
+    schools: {},
+    researched: [],
+    buffs: [],
+    nextRaidAt: 0,
+    lastRaid: null,
   },
   resources: {
     Food: 500,
@@ -204,9 +265,9 @@ export const buildingCost = (level: number) => {
   return { Gold: amount, Wood: amount };
 };
 
-export const BUILDING_LAND: Record<Resource | 'Barracks' | 'Housing' | 'Tavern', number> = {
+export const BUILDING_LAND: Record<BuildingType, number> = {
   Food: 5, Wood: 2, Iron: 1, Gold: 1, Mana: 1,
-  Housing: 1, Barracks: 1, Tavern: 2,
+  Housing: 1, Barracks: 1, Tavern: 2, WizardTower: 2,
 };
 
 export const TAVERN_NAMES = [
@@ -414,7 +475,7 @@ export const popPerHousing = () => {
 
 export const workerCapPerBuilding = () => hasResearch('census') ? 10 : 5;
 
-export const effectiveBuildingCost = (level: number, type?: Resource | 'Barracks' | 'Housing' | 'Tavern') => {
+export const effectiveBuildingCost = (level: number, type?: BuildingType) => {
   const base = buildingCost(level);
   let gold = base.Gold;
   let wood = base.Wood;
@@ -427,7 +488,7 @@ export const effectiveBuildingCost = (level: number, type?: Resource | 'Barracks
   return { Gold: Math.floor(gold), Wood: Math.floor(wood) };
 };
 
-export const effectiveBuildingLand = (type: Resource | 'Barracks' | 'Housing' | 'Tavern') => {
+export const effectiveBuildingLand = (type: BuildingType) => {
   let land = BUILDING_LAND[type];
   if (hasResearch('surveying')) land = land - 1;
   if (hasResearch('megastructures')) land = Math.floor(land / 2);
@@ -528,9 +589,10 @@ export const RACE_CONFIG = {
 };
 
 // Actions
-export const constructBuilding = (type: Resource | 'Barracks' | 'Housing' | 'Tavern') => {
+export const constructBuilding = (type: BuildingType) => {
   if (store.player.actionPoints < 1) return;
   if (type === 'Tavern' && store.buildings.Tavern >= TAVERN_MAX_LEVEL) return;
+  if (type === 'WizardTower' && store.buildings.WizardTower >= WIZARD_TOWER_MAX_LEVEL) return;
   if (landUsed() + effectiveBuildingLand(type) > store.province.acres) return;
 
   const cost = effectiveBuildingCost(store.buildings[type], type);
@@ -538,6 +600,10 @@ export const constructBuilding = (type: Resource | 'Barracks' | 'Housing' | 'Tav
     store.resources.Gold -= cost.Gold;
     store.resources.Wood -= cost.Wood;
     store.buildings[type]++;
+    // The tower's first level comes with the Defence school built in.
+    if (type === 'WizardTower' && !store.spells.schools.defence) {
+      store.spells.schools.defence = 1;
+    }
     store.player.actionPoints--;
   }
 };
@@ -550,7 +616,7 @@ export const constructBuilding = (type: Resource | 'Barracks' | 'Housing' | 'Tav
 export const vampirePrisoners = (): number => {
   if (store.player.race !== 'Vampire') return 0;
   const ghouls = (Object.values(store.workers) as WorkerState[]).reduce((acc, w) => acc + w.basic, 0);
-  return Math.max(0, Math.floor(store.province.population) - ghouls - store.blooddolls - store.player.spies);
+  return Math.max(0, Math.floor(store.province.population) - ghouls - store.blooddolls - store.player.spies - store.wizards);
 };
 
 export const vampireCanSpendPop = (): boolean => {
@@ -756,6 +822,193 @@ export const resolveDueAttacks = () => {
   markAction();
 };
 
+// ── Wizard Tower: schools, spells, casting ──────────────────────────────
+export const WIZARD_TOWER_MAX_LEVEL = 5;
+export const WIZARDS_PER_TOWER_LEVEL = 3;
+export const SCHOOL_MAX_LEVEL = 5;
+
+export const SPELLS: Record<string, SpellDef> = {
+  // Defence school (phase 1). Timed buffs: tier = duration in hours.
+  stone_skin:      { id: 'stone_skin',      name: 'Stone Skin',      school: 'defence', tier: 1, durationHours: 1, defenseBonus: 0.10, description: 'Province defense +10% for 1h' },
+  arcane_barrier:  { id: 'arcane_barrier',  name: 'Arcane Barrier',  school: 'defence', tier: 2, durationHours: 2, defenseBonus: 0.20, description: 'Province defense +20% for 2h' },
+  watchful_wards:  { id: 'watchful_wards',  name: 'Watchful Wards',  school: 'defence', tier: 3, durationHours: 3, defenseBonus: 0.30, raidWarning: true, description: 'Defense +30% for 3h and incoming raids are announced 30 min ahead' },
+  bulwark_of_mist: { id: 'bulwark_of_mist', name: 'Bulwark of Mist', school: 'defence', tier: 4, durationHours: 4, defenseBonus: 0.50, description: 'Province defense +50% for 4h' },
+  aegis_dome:      { id: 'aegis_dome',      name: 'Aegis Dome',      school: 'defence', tier: 5, durationHours: 5, repelRaids: true, description: 'Raids are repelled without a battle for 5h' },
+};
+
+// Per-tier costs. Research is one-time; casting also kills `tier` wizards.
+export const SPELL_RESEARCH_COST: Record<number, { Gold: number; Mana: number }> = {
+  1: { Gold: 500, Mana: 50 }, 2: { Gold: 1500, Mana: 150 }, 3: { Gold: 4000, Mana: 400 },
+  4: { Gold: 8000, Mana: 800 }, 5: { Gold: 15000, Mana: 1500 },
+};
+export const SPELL_CAST_MANA: Record<number, number> = { 1: 50, 2: 100, 3: 200, 4: 400, 5: 800 };
+
+export const WIZARD_COST = { Gold: 500, Mana: 50 };
+
+export const wizardCap = () => store.buildings.WizardTower * WIZARDS_PER_TOWER_LEVEL;
+
+export const schoolLevel = (school: SpellSchool) => store.spells.schools[school] ?? 0;
+
+// School level is capped by tower level: a tier-5 spell needs tower 5.
+export const schoolUpgradeCost = (currentLevel: number) => ({
+  Gold: 1000 * Math.pow(2, currentLevel - 1),
+  Mana: 100 * Math.pow(2, currentLevel - 1),
+});
+
+export const upgradeSchool = (school: SpellSchool) => {
+  const level = schoolLevel(school);
+  if (level === 0) return; // school not built (phase 2: building new schools)
+  if (level >= SCHOOL_MAX_LEVEL || level >= store.buildings.WizardTower) return;
+  const cost = schoolUpgradeCost(level);
+  if (store.resources.Gold < cost.Gold || store.resources.Mana < cost.Mana) return;
+  store.resources.Gold -= cost.Gold;
+  store.resources.Mana -= cost.Mana;
+  store.spells.schools[school] = level + 1;
+  markAction();
+};
+
+export const trainWizard = () => {
+  if (store.buildings.WizardTower < 1) return;
+  if (store.wizards >= wizardCap()) return;
+  if (!vampireCanSpendPop()) return;
+  const isVamp = store.player.race === 'Vampire';
+  if (!isVamp && getTotalWorkers() + store.wizards >= Math.floor(store.province.population)) return;
+  if (store.resources.Gold < WIZARD_COST.Gold || store.resources.Mana < WIZARD_COST.Mana) return;
+  store.resources.Gold -= WIZARD_COST.Gold;
+  store.resources.Mana -= WIZARD_COST.Mana;
+  store.wizards++;
+  markAction();
+};
+
+export const hasSpell = (spellId: string) => store.spells.researched.includes(spellId);
+
+export const canResearchSpell = (spellId: string) => {
+  const spell = SPELLS[spellId];
+  if (!spell || hasSpell(spellId)) return false;
+  if (schoolLevel(spell.school) < spell.tier) return false;
+  const cost = SPELL_RESEARCH_COST[spell.tier];
+  return store.resources.Gold >= cost.Gold && store.resources.Mana >= cost.Mana;
+};
+
+export const researchSpell = (spellId: string) => {
+  if (!canResearchSpell(spellId)) return;
+  const cost = SPELL_RESEARCH_COST[SPELLS[spellId].tier];
+  store.resources.Gold -= cost.Gold;
+  store.resources.Mana -= cost.Mana;
+  store.spells.researched.push(spellId);
+  markAction();
+};
+
+export const isBuffActive = (spellId: string) =>
+  store.spells.buffs.some(b => b.spellId === spellId && b.expiresAt > Date.now());
+
+export const canCastSpell = (spellId: string) => {
+  const spell = SPELLS[spellId];
+  if (!spell || !hasSpell(spellId)) return false;
+  if (isBuffActive(spellId)) return false; // no stacking the same buff
+  return store.wizards >= spell.tier && store.resources.Mana >= SPELL_CAST_MANA[spell.tier];
+};
+
+export const castSpell = (spellId: string) => {
+  if (!canCastSpell(spellId)) return;
+  const spell = SPELLS[spellId];
+  store.resources.Mana -= SPELL_CAST_MANA[spell.tier];
+  // Casting consumes the wizards — they're population, so the deaths shrink it.
+  store.wizards -= spell.tier;
+  store.province.population = Math.max(0, store.province.population - spell.tier);
+  if (spell.durationHours) {
+    store.spells.buffs.push({
+      spellId,
+      expiresAt: Date.now() + spell.durationHours * 60 * 60 * 1000,
+    });
+  }
+  markAction();
+};
+
+// ── NPC raids ───────────────────────────────────────────────────────────
+// A warband sized to your acres attacks at a random moment every 4-12h.
+// Defense = troops + peasants + active Defence buffs. Standard loss on
+// defeat: -10% of each resource, -5% population.
+const RAID_MIN_GAP_MS = 4 * 60 * 60 * 1000;
+const RAID_MAX_GAP_MS = 12 * 60 * 60 * 1000;
+export const RAID_WARNING_MS = 30 * 60 * 1000;
+
+const scheduleNextRaid = () => {
+  store.spells.nextRaidAt =
+    Date.now() + RAID_MIN_GAP_MS + Math.random() * (RAID_MAX_GAP_MS - RAID_MIN_GAP_MS);
+};
+
+const activeDefenseBonus = () => {
+  const now = Date.now();
+  let bonus = 0;
+  for (const buff of store.spells.buffs) {
+    if (buff.expiresAt <= now) continue;
+    bonus += SPELLS[buff.spellId]?.defenseBonus ?? 0;
+  }
+  return bonus;
+};
+
+export const provinceDefense = () => {
+  let def = 0;
+  if (store.player.race) {
+    const cfg = TROOP_CONFIG[store.player.race];
+    def += store.military.tier1 * (cfg.tier1.defense + troopDefenseBonus(1));
+    def += store.military.tier2 * (cfg.tier2.defense + troopDefenseBonus(2));
+    def += store.military.tier3 * (cfg.tier3.defense + troopDefenseBonus(3));
+    def *= troopMultiplier();
+    const peasants = Math.max(
+      0,
+      Math.floor(store.province.population) - getTotalWorkers() - store.blooddolls - store.wizards
+    );
+    def += peasants * PEASANT_COMBAT[store.player.race].defense;
+  }
+  return Math.floor(def * (1 + activeDefenseBonus()));
+};
+
+const resolveRaid = () => {
+  const repelled = store.spells.buffs.some(
+    b => b.expiresAt > Date.now() && SPELLS[b.spellId]?.repelRaids
+  );
+  const strength = Math.floor(store.province.acres * 2 * (0.8 + Math.random() * 0.4));
+  const defense = provinceDefense();
+  const won = repelled || defense >= strength;
+  let lootGold = 0;
+  if (repelled) {
+    // Aegis Dome turns them away before a fight — nothing gained or lost.
+  } else if (won) {
+    lootGold = Math.floor(strength / 2);
+    store.resources.Gold += lootGold;
+  } else {
+    (Object.keys(store.resources) as Resource[]).forEach(res => {
+      store.resources[res] = Math.floor(store.resources[res] * 0.9);
+    });
+    store.blood = Math.floor(store.blood * 0.9);
+    store.province.population = Math.floor(store.province.population * 0.95);
+  }
+  store.spells.lastRaid = { at: Date.now(), strength, defense, won, repelled, lootGold };
+};
+
+export const tickRaids = () => {
+  if (store.phase !== 'GAMEPLAY') return;
+  const now = Date.now();
+  // Expire finished buffs (cheap, and keeps the save payload small).
+  if (store.spells.buffs.some(b => b.expiresAt <= now)) {
+    store.spells.buffs = store.spells.buffs.filter(b => b.expiresAt > now);
+  }
+  if (store.spells.nextRaidAt === 0) {
+    scheduleNextRaid();
+    markAction();
+    return;
+  }
+  if (now >= store.spells.nextRaidAt) {
+    // At most one raid resolves per return: long absences aren't punished
+    // with a queue of stored-up defeats.
+    resolveRaid();
+    scheduleNextRaid();
+    markAction();
+  }
+};
+
 export const explore = () => {
   if (store.player.actionPoints < 1) return;
   const troops = totalTroops();
@@ -795,6 +1048,9 @@ export const startGame = (extraResources: Resource[]) => {
   store.buildings.Tavern = 1;
   store.heroes = [];
   store.attacks = [];
+  store.buildings.WizardTower = 0;
+  store.wizards = 0;
+  store.spells = { schools: {}, researched: [], buffs: [], nextRaidAt: 0, lastRaid: null };
   store.player.spies = 0;
   store.blooddolls = 0;
   store.blood = 0;
@@ -904,6 +1160,9 @@ export const collectResources = () => {
 
     // 2b. Attack missions whose real-world timer ran out come home now.
     resolveDueAttacks();
+
+    // 2c. Spell buffs expire and NPC raids strike when their hour comes.
+    tickRaids();
 
     // 3. Population Growth — Vampires never grow naturally; kidnap is the only path.
     if (store.player.race !== 'Vampire') {

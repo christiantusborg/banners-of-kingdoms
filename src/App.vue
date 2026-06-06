@@ -130,6 +130,8 @@ const beforeUnload = () => {
         research: store.research,
         heroes: store.heroes,
         attacks: store.attacks,
+        wizards: store.wizards,
+        spells: store.spells,
         blooddolls: store.blooddolls,
         blood: store.blood,
       }),

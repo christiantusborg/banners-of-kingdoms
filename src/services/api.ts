@@ -16,6 +16,8 @@ interface SaveableState {
   research: GameState['research'];
   heroes: GameState['heroes'];
   attacks: GameState['attacks'];
+  wizards: number;
+  spells: GameState['spells'];
   blooddolls: number;
   blood: number;
 }
@@ -42,6 +44,14 @@ function snapshot(state: GameState): SaveableState {
     research: [...state.research],
     heroes: [...state.heroes],
     attacks: state.attacks.map(a => ({ ...a })),
+    wizards: state.wizards,
+    spells: {
+      schools: { ...state.spells.schools },
+      researched: [...state.spells.researched],
+      buffs: state.spells.buffs.map(b => ({ ...b })),
+      nextRaidAt: state.spells.nextRaidAt,
+      lastRaid: state.spells.lastRaid ? { ...state.spells.lastRaid } : null,
+    },
     blooddolls: state.blooddolls,
     blood: state.blood,
   };
@@ -113,6 +123,16 @@ export function applyLoadedState(loaded: Partial<GameState>) {
   if (loaded.heroes) store.heroes = [...loaded.heroes];
   // Missions that finished while logged out resolve on the next tick.
   if (loaded.attacks) store.attacks = loaded.attacks.map(a => ({ ...a }));
+  if (typeof loaded.wizards === 'number') store.wizards = loaded.wizards;
+  if (loaded.spells) {
+    store.spells = {
+      schools: { ...loaded.spells.schools },
+      researched: [...(loaded.spells.researched ?? [])],
+      buffs: (loaded.spells.buffs ?? []).map(b => ({ ...b })),
+      nextRaidAt: loaded.spells.nextRaidAt ?? 0,
+      lastRaid: loaded.spells.lastRaid ? { ...loaded.spells.lastRaid } : null,
+    };
+  }
   if (typeof loaded.blooddolls === 'number') store.blooddolls = loaded.blooddolls;
   if (typeof loaded.blood === 'number') store.blood = loaded.blood;
   store.lastTick = Date.now();

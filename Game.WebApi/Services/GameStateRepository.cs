@@ -6,6 +6,14 @@ namespace Game.WebApi.Services;
 
 public class GameStateRepository
 {
+    // LastRaidJson round-trips through the camelCase wire format so the
+    // payload the client sent is what it gets back.
+    private static readonly System.Text.Json.JsonSerializerOptions JsonOpts = new()
+    {
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+    };
+
     private readonly string _connectionString;
 
     public GameStateRepository(IConfiguration configuration)
@@ -147,6 +155,40 @@ public class GameStateRepository
                 Tier3 = Convert.ToInt32(r["Tier3"]),
                 StartedAt = Convert.ToInt64(r["StartedAt"]),
                 EndsAt = Convert.ToInt64(r["EndsAt"]),
+            }).ToList();
+
+        var wizRow = await QuerySingleAsync(conn,
+            "SELECT Wizards, NextRaidAt, LastRaidJson FROM PlayerWizardry WHERE PlayerId = $pid",
+            new() { ["$pid"] = playerId }, ct);
+        if (wizRow is not null)
+        {
+            dto.Wizards = Convert.ToInt32(wizRow["Wizards"]);
+            dto.Spells.NextRaidAt = Convert.ToInt64(wizRow["NextRaidAt"]);
+            if (wizRow["LastRaidJson"] is string json && json.Length > 0)
+            {
+                dto.Spells.LastRaid = System.Text.Json.JsonSerializer.Deserialize<RaidReportDto>(json, JsonOpts);
+            }
+        }
+
+        foreach (var row in await QueryListAsync(conn,
+            "SELECT School, Level FROM PlayerSpellSchools WHERE PlayerId = $pid",
+            new() { ["$pid"] = playerId }, ct))
+        {
+            dto.Spells.Schools[(string)row["School"]] = Convert.ToInt32(row["Level"]);
+        }
+
+        dto.Spells.Researched = (await QueryListAsync(conn,
+            "SELECT SpellId FROM PlayerSpells WHERE PlayerId = $pid",
+            new() { ["$pid"] = playerId }, ct))
+            .Select(r => (string)r["SpellId"]).ToList();
+
+        dto.Spells.Buffs = (await QueryListAsync(conn,
+            "SELECT SpellId, ExpiresAt FROM PlayerSpellBuffs WHERE PlayerId = $pid",
+            new() { ["$pid"] = playerId }, ct))
+            .Select(r => new SpellBuffDto
+            {
+                SpellId = (string)r["SpellId"],
+                ExpiresAt = Convert.ToInt64(r["ExpiresAt"]),
             }).ToList();
 
         return dto;
@@ -324,6 +366,47 @@ public class GameStateRepository
                     ["$start"] = attack.StartedAt,
                     ["$end"] = attack.EndsAt,
                 }, ct);
+        }
+
+        var lastRaidJson = state.Spells.LastRaid is null
+            ? (object)DBNull.Value
+            : System.Text.Json.JsonSerializer.Serialize(state.Spells.LastRaid, JsonOpts);
+        await ExecNonQueryAsync(conn, tx,
+            @"INSERT INTO PlayerWizardry (PlayerId, Wizards, NextRaidAt, LastRaidJson)
+              VALUES ($pid, $w, $next, $raid)
+              ON CONFLICT(PlayerId) DO UPDATE SET
+                Wizards = excluded.Wizards, NextRaidAt = excluded.NextRaidAt,
+                LastRaidJson = excluded.LastRaidJson",
+            new() { ["$pid"] = playerId, ["$w"] = state.Wizards, ["$next"] = state.Spells.NextRaidAt, ["$raid"] = lastRaidJson }, ct);
+
+        await ExecNonQueryAsync(conn, tx, "DELETE FROM PlayerSpellSchools WHERE PlayerId = $pid",
+            new() { ["$pid"] = playerId }, ct);
+        foreach (var (school, level) in state.Spells.Schools)
+        {
+            if (string.IsNullOrEmpty(school) || level <= 0) continue;
+            await ExecNonQueryAsync(conn, tx,
+                "INSERT INTO PlayerSpellSchools (PlayerId, School, Level) VALUES ($pid, $s, $l)",
+                new() { ["$pid"] = playerId, ["$s"] = school, ["$l"] = level }, ct);
+        }
+
+        await ExecNonQueryAsync(conn, tx, "DELETE FROM PlayerSpells WHERE PlayerId = $pid",
+            new() { ["$pid"] = playerId }, ct);
+        foreach (var spellId in state.Spells.Researched.Where(s => !string.IsNullOrEmpty(s)).Distinct())
+        {
+            await ExecNonQueryAsync(conn, tx,
+                "INSERT INTO PlayerSpells (PlayerId, SpellId) VALUES ($pid, $s)",
+                new() { ["$pid"] = playerId, ["$s"] = spellId }, ct);
+        }
+
+        await ExecNonQueryAsync(conn, tx, "DELETE FROM PlayerSpellBuffs WHERE PlayerId = $pid",
+            new() { ["$pid"] = playerId }, ct);
+        foreach (var buff in state.Spells.Buffs)
+        {
+            if (string.IsNullOrEmpty(buff.SpellId)) continue;
+            await ExecNonQueryAsync(conn, tx,
+                @"INSERT INTO PlayerSpellBuffs (PlayerId, SpellId, ExpiresAt) VALUES ($pid, $s, $e)
+                  ON CONFLICT(PlayerId, SpellId) DO UPDATE SET ExpiresAt = excluded.ExpiresAt",
+                new() { ["$pid"] = playerId, ["$s"] = buff.SpellId, ["$e"] = buff.ExpiresAt }, ct);
         }
 
         await tx.CommitAsync(ct);

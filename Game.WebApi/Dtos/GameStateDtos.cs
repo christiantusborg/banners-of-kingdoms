@@ -18,6 +18,8 @@ public class GameStateDto
     public List<string> Research { get; set; } = new();
     public List<string> Heroes { get; set; } = new();
     public List<AttackDto> Attacks { get; set; } = new();
+    public int Wizards { get; set; }
+    public SpellStateDto Spells { get; set; } = new();
     // Vampire-specific sub-pop + resource. Always present so the round-trip
     // is symmetric for every race (non-vampires save/load these as 0).
     public int Blooddolls { get; set; }
@@ -67,4 +69,32 @@ public class AttackDto
     public int Tier3 { get; set; }
     public long StartedAt { get; set; }
     public long EndsAt { get; set; }
+}
+
+// Wizard Tower state. Like attacks, all game logic (spell effects, raid
+// resolution) is client-side; the server persists the state so buffs and
+// the raid schedule survive logout. Timestamps are ms since epoch.
+public class SpellStateDto
+{
+    public Dictionary<string, int> Schools { get; set; } = new();
+    public List<string> Researched { get; set; } = new();
+    public List<SpellBuffDto> Buffs { get; set; } = new();
+    public long NextRaidAt { get; set; }
+    public RaidReportDto? LastRaid { get; set; }
+}
+
+public class SpellBuffDto
+{
+    public string SpellId { get; set; } = "";
+    public long ExpiresAt { get; set; }
+}
+
+public class RaidReportDto
+{
+    public long At { get; set; }
+    public int Strength { get; set; }
+    public int Defense { get; set; }
+    public bool Won { get; set; }
+    public bool Repelled { get; set; }
+    public int LootGold { get; set; }
 }
