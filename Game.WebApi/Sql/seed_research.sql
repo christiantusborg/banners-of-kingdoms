@@ -40,8 +40,8 @@ INSERT OR IGNORE INTO ResearchNodes (Id, Code, Name, BranchId, Tier, Slot, CostG
     -- Construction
     (29, 'engineering',    'Engineering',    4, 1, 1,  500, NULL, 'Building Gold cost -25%'),
     (30, 'foundations',    'Foundations',    4, 2, 1, 1500, NULL, 'Building Wood cost -25%'),
-    (31, 'surveying',      'Surveying',      4, 2, 2, 2000, NULL, 'Building land cost -1 (min 0)'),
-    (32, 'megastructures', 'Megastructures', 4, 3, 2, 6000, NULL, 'Building land cost halved (rounded down)'),
+    (31, 'surveying',      'Surveying',      4, 2, 2, 2000, NULL, 'Building land cost -1 (min 1)'),
+    (32, 'megastructures', 'Megastructures', 4, 3, 2, 6000, NULL, 'Building land cost halved (rounded down, min 1)'),
 
     -- Espionage
     (33, 'espionage_101', 'Espionage 101', 5, 1, 1,  1000, NULL, 'Each Spy generates +2 Gold per tick'),

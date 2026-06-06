@@ -186,7 +186,7 @@ export const buildingCost = (level: number) => {
 };
 
 export const BUILDING_LAND: Record<Resource | 'Barracks' | 'Housing' | 'Tavern', number> = {
-  Food: 5, Wood: 2, Iron: 1, Gold: 1, Mana: 0,
+  Food: 5, Wood: 2, Iron: 1, Gold: 1, Mana: 1,
   Housing: 1, Barracks: 1, Tavern: 2,
 };
 
@@ -249,8 +249,8 @@ export const RESEARCH: Record<string, Research> = {
   // ── Construction ─────────────────────────────────────────────────────
   engineering:    { id: 'engineering',    name: 'Engineering',    branch: 'construction', tier: 1, slot: 1, cost: { Gold:  500 }, prereqs: [], description: 'Building Gold cost −25%' },
   foundations:    { id: 'foundations',    name: 'Foundations',    branch: 'construction', tier: 2, slot: 1, cost: { Gold: 1500 }, prereqs: ['engineering'], description: 'Building Wood cost −25%' },
-  surveying:      { id: 'surveying',      name: 'Surveying',      branch: 'construction', tier: 2, slot: 2, cost: { Gold: 2000 }, prereqs: ['engineering'], description: 'Building land cost −1 (min 0)' },
-  megastructures: { id: 'megastructures', name: 'Megastructures', branch: 'construction', tier: 3, slot: 2, cost: { Gold: 6000 }, prereqs: ['foundations', 'surveying'], description: 'Building land cost halved (rounded down)' },
+  surveying:      { id: 'surveying',      name: 'Surveying',      branch: 'construction', tier: 2, slot: 2, cost: { Gold: 2000 }, prereqs: ['engineering'], description: 'Building land cost −1 (min 1)' },
+  megastructures: { id: 'megastructures', name: 'Megastructures', branch: 'construction', tier: 3, slot: 2, cost: { Gold: 6000 }, prereqs: ['foundations', 'surveying'], description: 'Building land cost halved (rounded down, min 1)' },
 
   // ── Espionage ────────────────────────────────────────────────────────
   espionage_101: { id: 'espionage_101', name: 'Espionage 101', branch: 'espionage', tier: 1, slot: 1, cost: { Gold:  1000 }, prereqs: [], description: 'Each Spy generates +2 Gold per tick' },
@@ -402,9 +402,10 @@ export const effectiveBuildingCost = (level: number, type?: Resource | 'Barracks
 
 export const effectiveBuildingLand = (type: Resource | 'Barracks' | 'Housing' | 'Tavern') => {
   let land = BUILDING_LAND[type];
-  if (hasResearch('surveying')) land = Math.max(0, land - 1);
+  if (hasResearch('surveying')) land = land - 1;
   if (hasResearch('megastructures')) land = Math.floor(land / 2);
-  return land;
+  // Every building occupies at least 1 acre per level, regardless of research.
+  return Math.max(1, land);
 };
 
 export const troopAttackBonus = (tier: 1 | 2 | 3) => {
